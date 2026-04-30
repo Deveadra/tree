@@ -9,7 +9,7 @@ import os
 
 from dupe_core import safe_mkdir, write_json_atomic
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 ErrorCallback = Callable[[dict[str, Any]], None]
 
@@ -51,13 +51,40 @@ def scan_space_usage(
     start = _utc_now_iso()
 
     volume_total = 0
+    volume_free = 0
+    volume_used = 0
+    volume_info_confidence = "none"
+    volume_info_caveats: list[str] = []
+    size_modes = {
+        "apparent": {
+            "enabled": True,
+            "description": "Logical file size from st_size.",
+            "fallback_behavior": "Always available when file metadata can be read.",
+            "confidence": "high",
+        },
+        "allocated": {
+            "enabled": True,
+            "description": "Allocated size from st_blocks*512 when the platform exposes st_blocks.",
+            "fallback_behavior": "Falls back to apparent size when st_blocks is unavailable.",
+            "confidence": "partial",
+        },
+    }
+
     try:
-        volume_total = os.statvfs(root_path).f_blocks * os.statvfs(root_path).f_frsize
-    except OSError:
-        pass
+        statvfs = os.statvfs(root_path)
+        volume_total = int(statvfs.f_blocks * statvfs.f_frsize)
+        volume_free = int(statvfs.f_bavail * statvfs.f_frsize)
+        volume_used = max(0, int(volume_total - volume_free))
+        volume_info_confidence = "high"
+    except OSError as exc:
+        volume_info_caveats.append(f"volume stats unavailable: {exc}")
+    except AttributeError:
+        volume_info_caveats.append("volume stats unavailable on this platform")
 
     dir_totals: Counter[str] = Counter()
+    dir_totals_allocated: Counter[str] = Counter()
     ext_totals: Counter[str] = Counter()
+    ext_totals_allocated: Counter[str] = Counter()
     file_count = 0
     skipped_count = 0
     errors: list[dict[str, Any]] = []
@@ -98,7 +125,13 @@ def scan_space_usage(
                 if policy and not policy(file_path, st):
                     skipped_count += 1
                     continue
-                size = st.st_size
+                size = int(st.st_size)
+                allocated = size
+                if hasattr(st, "st_blocks"):
+                    allocated = int(st.st_blocks) * 512
+                else:
+                    size_modes["allocated"]["confidence"] = "low"
+                    size_modes["allocated"]["fallback_behavior"] = "Platform does not expose st_blocks; allocated size equals apparent size."
             except OSError as exc:
                 if getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM, errno.ENOENT, errno.EBUSY, errno.EIO}:
                     record_error(str(file_path), exc)
@@ -110,10 +143,14 @@ def scan_space_usage(
             rel_parts = file_path.relative_to(root_path).parts
             max_depth = min(depth, len(rel_parts) - 1)
             dir_totals["."] += size
+            dir_totals_allocated["."] += allocated
             for d in range(1, max_depth + 1):
                 key = "/".join(rel_parts[:d])
                 dir_totals[key] += size
-            ext_totals[_extension_for(file_path)] += size
+                dir_totals_allocated[key] += allocated
+            ext = _extension_for(file_path)
+            ext_totals[ext] += size
+            ext_totals_allocated[ext] += allocated
 
             if metrics_cb is not None and file_count % 500 == 0:
                 metrics_cb(
@@ -126,7 +163,14 @@ def scan_space_usage(
                 )
 
     tree_total = int(dir_totals.get(".", 0))
-    unattributed = max(0, int(volume_total - tree_total)) if volume_total else 0
+    tree_total_allocated = int(dir_totals_allocated.get(".", 0))
+    unattributed = int(volume_used - tree_total) if volume_total else 0
+    reserved_or_system_managed_estimate = int(volume_used - tree_total_allocated) if volume_total else None
+
+    if not volume_total:
+        volume_info_confidence = "none"
+    elif not volume_info_caveats and size_modes["allocated"]["confidence"] == "partial":
+        size_modes["allocated"]["confidence"] = "high"
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -138,15 +182,28 @@ def scan_space_usage(
             "cancelled": bool(cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)()),
         },
         "totals": {
+            "volume_total_bytes": int(volume_total),
+            "volume_free_bytes": int(volume_free),
+            "volume_used_bytes": int(volume_used),
             "volume_bytes": int(volume_total),
+            "tree_sum_bytes": tree_total,
+            "tree_sum_allocated_bytes": tree_total_allocated,
             "tree_bytes": tree_total,
             "unattributed_bytes": unattributed,
+            "reserved_or_system_managed_estimate": reserved_or_system_managed_estimate,
             "file_count": file_count,
             "skipped_count": skipped_count,
             "error_count": len(errors),
         },
-        "tree": {"dir_bytes": dict(dir_totals)},
-        "extensions": {"ext_bytes": dict(ext_totals)},
+        "size_modes": size_modes,
+        "confidence": {
+            "volume_metrics": volume_info_confidence,
+            "unattributed_bytes": "high" if volume_total else "none",
+            "reserved_or_system_managed_estimate": "partial" if reserved_or_system_managed_estimate is not None else "none",
+        },
+        "caveats": volume_info_caveats,
+        "tree": {"dir_bytes": dict(dir_totals), "dir_allocated_bytes": dict(dir_totals_allocated)},
+        "extensions": {"ext_bytes": dict(ext_totals), "ext_allocated_bytes": dict(ext_totals_allocated)},
         "errors": errors,
     }
 
