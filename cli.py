@@ -41,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--audit-log", default="reports/prune_audit.jsonl")
     ap.add_argument("--json", action="store_true", dest="as_json")
+    ap.add_argument("--policy", default="config/protection.toml")
 
     r = sub.add_parser("report", help="Write report artifacts")
     r.add_argument("--compare", action="store_true")
@@ -100,7 +101,13 @@ def main() -> int:
 
     if args.cmd == "apply-prune":
         plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
-        result = service.apply_prune(plan, dry_run=args.dry_run, yes=args.yes, audit_log=Path(args.audit_log))
+        result = service.apply_prune(
+            plan,
+            dry_run=args.dry_run,
+            yes=args.yes,
+            audit_log=Path(args.audit_log),
+            policy_path=Path(args.policy),
+        )
         _emit(result, args.as_json)
         return 0
 
