@@ -121,6 +121,10 @@ def run_free_space_watchdog(
     spike_threshold_bytes: int | None,
     enable_local_notifications: bool = False,
     alerts_feed_path: Path | None = None,
+    hash_usernames: bool = False,
+    hash_filenames: bool = False,
+    hash_process_arguments: bool = False,
+    local_only_mode: bool = False,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +137,10 @@ def run_free_space_watchdog(
         free_space_drop_spike_threshold_bytes=spike_threshold_bytes,
         enable_local_notifications=enable_local_notifications,
         alerts_feed_path=alerts_feed_path,
+        hash_usernames=hash_usernames,
+        hash_filenames=hash_filenames,
+        hash_process_arguments=hash_process_arguments,
+        local_only_mode=local_only_mode,
         cancel_flag=cancel_flag,
     )
 
