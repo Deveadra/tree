@@ -22,6 +22,8 @@ class SpaceAuditDiffTests(unittest.TestCase):
 
         diff = diff_space_snapshots(current, previous, noise_threshold_bytes=10)
 
+        self.assertIn("zone_tag", diff["tree"]["ranked_growth"][0])
+
         self.assertEqual(diff["summary"]["total_growth_bytes"], 180)
         self.assertEqual(diff["summary"]["total_shrink_bytes"], 110)
         self.assertEqual(diff["summary"]["net_change_bytes"], 70)
@@ -47,6 +49,16 @@ class SpaceAuditDiffTests(unittest.TestCase):
             found = resolve_previous_snapshot(report_root, run3, report_root)
             self.assertIsNotNone(found)
             self.assertEqual(found["run"]["finished_at"], "2026-04-29T00:00:00+00:00")
+
+    def test_resolve_previous_snapshot_in_single_report_dir(self):
+        with TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            snap = {"run": {"root": str(report_dir), "finished_at": "2026-04-29T12:00:00+00:00"}}
+            (report_dir / "space_snapshot.json").write_text(__import__("json").dumps(snap), encoding="utf-8")
+
+            found = resolve_previous_snapshot(report_dir, report_dir, report_dir)
+            self.assertIsNotNone(found)
+            self.assertEqual(found["run"]["finished_at"], "2026-04-29T12:00:00+00:00")
 
     def test_write_reports_emits_new_diff_filename(self):
         with TemporaryDirectory() as tmp:

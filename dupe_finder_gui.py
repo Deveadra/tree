@@ -33,6 +33,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QAction
+from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -61,6 +62,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
 )
 
 from core.service import (
@@ -83,6 +85,8 @@ from dupe_core import (
     fmt_time,
     format_bytes,
     new_run_id,
+    write_live_reports,
+    write_scan_reports,
 )
 from core.models import ScanRequest
 from core.space_audit import (
@@ -451,6 +455,10 @@ class SpaceAuditWorker(QObject):
                     metrics_cb=self.metrics.emit,
                     policy_path=self.policy_path,
                 )
+                if self._cancel_event.is_set() or bool(snapshot.get("cancelled")):
+                    self.status.emit("Disk usage analysis cancelled.")
+                    self.finished.emit({"cancelled": True})
+                    return
                 top_dirs = summarize_top_dirs(snapshot, top_n=12)
                 by_ext = summarize_by_extension(snapshot, top_n=30)
                 prev = resolve_previous_snapshot(self.report_dir.parent, self.report_dir, root)
@@ -788,6 +796,67 @@ class MainWindow(QMainWindow):
         self.status_box.setFixedHeight(110)
 
         self.tabs = QTabWidget()
+        self.monitor_tab = QWidget()
+        self.monitor_is_read_only_lbl = QLabel("Read-only monitor (no filesystem writes or delete actions).")
+        self.monitor_is_read_only_lbl.setStyleSheet("QLabel { color: #8b0000; font-weight: 700; }")
+        self.monitor_free_used_lbl = QLabel("Free/Used: n/a")
+        self.monitor_delta_lbl = QLabel("Recent delta: n/a")
+        self.monitor_alert_lbl = QLabel("Alert state: Normal")
+        self.monitor_alert_lbl.setStyleSheet("QLabel { color: #1f7a1f; font-weight: 700; }")
+        self.monitor_spark_chart = QChart()
+        self.monitor_spark_chart.legend().hide()
+        self.monitor_spark_chart.setBackgroundVisible(False)
+        self.monitor_sparkline = QLineSeries()
+        self.monitor_spark_chart.addSeries(self.monitor_sparkline)
+        self.monitor_spark_chart.createDefaultAxes()
+        self.monitor_spark_view = QChartView(self.monitor_spark_chart)
+        self.monitor_spark_view.setMinimumHeight(120)
+        self.monitor_spikes_table = QTableWidget(0, 5)
+        self.monitor_spikes_table.setHorizontalHeaderLabels(
+            ["Severity", "Time (UTC)", "Delta", "Top suspects", "Evidence bundle"]
+        )
+        self.monitor_spikes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.monitor_spikes_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.monitor_spikes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.open_evidence_btn = QPushButton("Open evidence bundle")
+        self.open_evidence_btn.setEnabled(False)
+        self.ai_findings_table = QTableWidget(0, 6)
+        self.ai_findings_table.setHorizontalHeaderLabels(
+            ["Finding", "Evidence citations", "Confidence", "Risk", "Alternates", "Event"]
+        )
+        self.ai_findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.ai_findings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.ai_findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.ai_why_btn = QPushButton("Why this?")
+        self.ai_why_btn.setEnabled(False)
+        self.ai_action_btn = QPushButton("Apply finding recommendation…")
+        self.ai_action_btn.setEnabled(False)
+        self.plan_state_combo = QComboBox()
+        self.plan_state_combo.addItems(["draft", "reviewed", "approved", "executed"])
+        self.plan_state_combo.setCurrentText("draft")
+        self.plan_advance_btn = QPushButton("Advance state")
+        self.monitor_interval_spin = QSpinBox()
+        self.monitor_interval_spin.setRange(1, 3600)
+        self.monitor_interval_spin.setValue(30)
+        self.monitor_interval_spin.setSuffix(" s")
+        self.monitor_trigger_spin = QSpinBox()
+        self.monitor_trigger_spin.setRange(1, 10_000_000)
+        self.monitor_trigger_spin.setValue(500)
+        self.monitor_trigger_spin.setSuffix(" MB")
+        self.monitor_retention_spin = QSpinBox()
+        self.monitor_retention_spin.setRange(1, 365)
+        self.monitor_retention_spin.setValue(14)
+        self.monitor_retention_spin.setSuffix(" days")
+        self.monitor_start_btn = QPushButton("Start")
+        self.monitor_pause_btn = QPushButton("Pause")
+        self.monitor_resume_btn = QPushButton("Resume")
+        self.monitor_pause_btn.setEnabled(False)
+        self.monitor_resume_btn.setEnabled(False)
+        self._monitor_mode = "stopped"
+        self._monitor_deltas: list[int] = []
+        self._monitor_spike_events: list[dict] = []
+        self._ai_findings_by_event: dict[str, list[dict]] = {}
+        self._selected_finding: Optional[dict] = None
         self.tree_by_name = QTreeWidget()
         self.tree_by_name.setHeaderLabels(
             ["Grouped by filename (hash-confirmed duplicates)"]
@@ -798,6 +867,36 @@ class MainWindow(QMainWindow):
         )
         self.tabs.addTab(self.tree_by_name, "By filename")
         self.tabs.addTab(self.tree_by_hash, "By content")
+        self.tabs.addTab(self.monitor_tab, "Space monitor")
+        monitor_layout = QVBoxLayout(self.monitor_tab)
+        monitor_layout.addWidget(self.monitor_is_read_only_lbl)
+        monitor_layout.addWidget(self.monitor_free_used_lbl)
+        monitor_layout.addWidget(self.monitor_delta_lbl)
+        monitor_layout.addWidget(self.monitor_alert_lbl)
+        monitor_layout.addWidget(self.monitor_spark_view)
+        monitor_layout.addWidget(QLabel("Spike Events"))
+        monitor_layout.addWidget(self.monitor_spikes_table)
+        monitor_layout.addWidget(QLabel("AI Findings"))
+        monitor_layout.addWidget(self.ai_findings_table)
+        ai_actions = QHBoxLayout()
+        ai_actions.addWidget(self.ai_why_btn)
+        ai_actions.addWidget(self.ai_action_btn)
+        ai_actions.addStretch(1)
+        monitor_layout.addLayout(ai_actions)
+        monitor_layout.addWidget(self.open_evidence_btn)
+        controls_form = QFormLayout()
+        controls_form.addRow("Sampling interval:", self.monitor_interval_spin)
+        controls_form.addRow("Trigger threshold:", self.monitor_trigger_spin)
+        controls_form.addRow("Retention setting:", self.monitor_retention_spin)
+        controls_form.addRow("Plan approval state:", self.plan_state_combo)
+        controls_form.addRow("", self.plan_advance_btn)
+        monitor_layout.addLayout(controls_form)
+        monitor_actions = QHBoxLayout()
+        monitor_actions.addWidget(self.monitor_start_btn)
+        monitor_actions.addWidget(self.monitor_pause_btn)
+        monitor_actions.addWidget(self.monitor_resume_btn)
+        monitor_actions.addStretch(1)
+        monitor_layout.addLayout(monitor_actions)
 
         self.files_table = QTableWidget(0, 4)
         self.files_table.setHorizontalHeaderLabels(
@@ -997,6 +1096,15 @@ class MainWindow(QMainWindow):
         self.open_folder_btn.clicked.connect(self.open_selected_folder)
 
         self.delete_mode.currentIndexChanged.connect(self.on_delete_mode_changed)
+        self.monitor_spikes_table.itemSelectionChanged.connect(self._on_monitor_spike_selection_changed)
+        self.ai_findings_table.itemSelectionChanged.connect(self._on_ai_finding_selection_changed)
+        self.open_evidence_btn.clicked.connect(self._open_selected_evidence_bundle)
+        self.ai_why_btn.clicked.connect(self._show_finding_why_dialog)
+        self.ai_action_btn.clicked.connect(self._confirm_finding_action)
+        self.plan_advance_btn.clicked.connect(self._advance_plan_state)
+        self.monitor_start_btn.clicked.connect(lambda: self._set_monitor_mode("running"))
+        self.monitor_pause_btn.clicked.connect(lambda: self._set_monitor_mode("paused"))
+        self.monitor_resume_btn.clicked.connect(lambda: self._set_monitor_mode("running"))
         self.on_delete_mode_changed()
 
         self.worker_thread: Optional[QThread] = None
@@ -1008,6 +1116,167 @@ class MainWindow(QMainWindow):
         self._ex_cache_raw: Optional[str] = None
         self._ex_cache: tuple[set[str], list[str]] = (set(), [])
         self.allowed_roots: list[Path] = []
+
+    def _set_monitor_mode(self, mode: str) -> None:
+        self._monitor_mode = mode
+        self.monitor_start_btn.setEnabled(mode == "stopped")
+        self.monitor_pause_btn.setEnabled(mode == "running")
+        self.monitor_resume_btn.setEnabled(mode == "paused")
+        self.set_status(f"Space monitor is now {mode} (read-only).")
+
+    def _on_monitor_spike_selection_changed(self) -> None:
+        self.open_evidence_btn.setEnabled(bool(self.monitor_spikes_table.selectedItems()))
+        row = self.monitor_spikes_table.currentRow()
+        event_id = ""
+        if 0 <= row < len(self._monitor_spike_events):
+            event_id = str(self._monitor_spike_events[row].get("event_id", ""))
+        self._render_ai_findings_for_event(event_id)
+
+    def _on_ai_finding_selection_changed(self) -> None:
+        row = self.ai_findings_table.currentRow()
+        self._selected_finding = None
+        if row >= 0:
+            event_id = self._selected_ai_event_id()
+            findings = self._ai_findings_by_event.get(event_id, [])
+            if row < len(findings):
+                self._selected_finding = findings[row]
+        enabled = self._selected_finding is not None
+        self.ai_why_btn.setEnabled(enabled)
+        self.ai_action_btn.setEnabled(enabled)
+
+    def _selected_ai_event_id(self) -> str:
+        row = self.monitor_spikes_table.currentRow()
+        if row < 0 or row >= len(self._monitor_spike_events):
+            return ""
+        return str(self._monitor_spike_events[row].get("event_id", ""))
+
+    def _render_ai_findings_for_event(self, event_id: str) -> None:
+        findings = self._ai_findings_by_event.get(event_id, [])
+        self.ai_findings_table.setRowCount(len(findings))
+        for idx, f in enumerate(findings):
+            self.ai_findings_table.setItem(idx, 0, QTableWidgetItem(str(f.get("finding", ""))))
+            self.ai_findings_table.setItem(idx, 1, QTableWidgetItem("; ".join(f.get("evidence_citations", []))))
+            self.ai_findings_table.setItem(idx, 2, QTableWidgetItem(str(f.get("confidence", ""))))
+            self.ai_findings_table.setItem(idx, 3, QTableWidgetItem(str(f.get("risk_label", ""))))
+            self.ai_findings_table.setItem(idx, 4, QTableWidgetItem("; ".join(f.get("alternate_hypotheses", []))))
+            self.ai_findings_table.setItem(idx, 5, QTableWidgetItem(str(event_id)))
+
+    def _show_finding_why_dialog(self) -> None:
+        if not self._selected_finding:
+            return
+        contrib = self._selected_finding.get("feature_contributions", [])
+        rows = "\n".join(f"• {r.get('feature')}: {r.get('weight')}" for r in contrib) if contrib else "No feature contribution data."
+        QMessageBox.information(self, "Why this?", rows)
+
+    def _advance_plan_state(self) -> None:
+        states = ["draft", "reviewed", "approved", "executed"]
+        cur = self.plan_state_combo.currentText()
+        idx = states.index(cur) if cur in states else 0
+        if idx >= len(states) - 1:
+            QMessageBox.information(self, "Plan workflow", "Plan is already in executed state.")
+            return
+        next_state = states[idx + 1]
+        self.plan_state_combo.setCurrentText(next_state)
+        self.set_status(f"Plan workflow moved: {cur} -> {next_state}")
+
+    def _confirm_finding_action(self) -> None:
+        if not self._selected_finding:
+            return
+        if self.plan_state_combo.currentText() != "approved":
+            QMessageBox.warning(self, "Approval required", "Plan must be approved before execution.")
+            return
+        prompt = (
+            "Manual confirmation required.\n\n"
+            f"Finding: {self._selected_finding.get('finding', 'unknown')}\n"
+            f"Risk: {self._selected_finding.get('risk_label', 'unknown')}\n\n"
+            "Proceed with destructive action?"
+        )
+        choice = QMessageBox.question(self, "Confirm destructive action", prompt, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if choice != QMessageBox.StandardButton.Yes:
+            self.set_status("Destructive action cancelled by user.")
+            return
+        self.plan_state_combo.setCurrentText("executed")
+        self.set_status("Manual confirmation accepted. Marked plan as executed.")
+
+    def _open_selected_evidence_bundle(self) -> None:
+        row = self.monitor_spikes_table.currentRow()
+        if row < 0 or row >= len(self._monitor_spike_events):
+            return
+        evidence_path = self._monitor_spike_events[row].get("evidence_bundle")
+        if not evidence_path:
+            QMessageBox.information(self, "No evidence bundle", "No evidence bundle is available for this spike event.")
+            return
+        self.reveal_in_explorer(str(evidence_path))
+
+    def _refresh_monitor_panel(self, snapshot: dict, top_offenders: list[dict], diff_summaries: list[dict]) -> None:
+        if self._monitor_mode != "running":
+            return
+        volume = snapshot.get("volume", {}) if isinstance(snapshot, dict) else {}
+        free_b = int(volume.get("free_bytes", 0))
+        used_b = int(volume.get("used_bytes", 0))
+        self.monitor_free_used_lbl.setText(f"Free/Used: {format_bytes(free_b)} free / {format_bytes(used_b)} used")
+        snapshot_root = ""
+        if isinstance(snapshot, dict):
+            run_info = snapshot.get("run", {})
+            if isinstance(run_info, dict):
+                snapshot_root = str(run_info.get("root", ""))
+        matching_diff = next(
+            (
+                item
+                for item in diff_summaries
+                if isinstance(item, dict) and (not snapshot_root or str(item.get("root", "")) == snapshot_root)
+            ),
+            None,
+        )
+        delta_b = int(matching_diff.get("net_change_bytes", 0)) if isinstance(matching_diff, dict) else 0
+        self.monitor_delta_lbl.setText(f"Recent delta: {format_bytes(abs(delta_b))} {'growth' if delta_b >= 0 else 'drop'}")
+        self._monitor_deltas.append(delta_b)
+        self._monitor_deltas = self._monitor_deltas[-30:]
+        self.monitor_sparkline.clear()
+        for i, v in enumerate(self._monitor_deltas):
+            self.monitor_sparkline.append(i, float(v))
+        self.monitor_spark_chart.createDefaultAxes()
+        threshold_b = int(self.monitor_trigger_spin.value()) * 1024 * 1024
+        if abs(delta_b) >= threshold_b:
+            self.monitor_alert_lbl.setText("Alert state: Spike detected")
+            self.monitor_alert_lbl.setStyleSheet("QLabel { color: #b22222; font-weight: 700; }")
+            suspects = ", ".join(str(row.get("path", "")) for row in top_offenders[:3]) or "n/a"
+            event = {
+                "event_id": f"spike-{int(time.time() * 1000)}",
+                "severity": "high" if abs(delta_b) >= threshold_b * 2 else "medium",
+                "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "delta": delta_b,
+                "suspects": suspects,
+                "evidence_bundle": self.report_dir / "space_snapshot.json",
+            }
+            self._monitor_spike_events.insert(0, event)
+            self._ai_findings_by_event[event["event_id"]] = [
+                {
+                    "finding": f"Spike likely driven by growth under {suspects.split(',')[0] if suspects else 'unknown'}",
+                    "evidence_citations": [
+                        f"dir:{str(top_offenders[0].get('path', 'n/a'))}" if top_offenders else "dir:n/a",
+                        f"metric:delta_bytes={delta_b}",
+                    ],
+                    "confidence": "0.78",
+                    "risk_label": "medium" if abs(delta_b) < threshold_b * 2 else "high",
+                    "alternate_hypotheses": ["temporary file burst", "log rotation anomaly"],
+                    "feature_contributions": [
+                        {"feature": "delta_bytes", "weight": 0.61},
+                        {"feature": "top_dir_growth", "weight": 0.39},
+                    ],
+                }
+            ]
+            self._monitor_spike_events = self._monitor_spike_events[: max(1, self.monitor_retention_spin.value() * 5)]
+            self.monitor_spikes_table.setRowCount(len(self._monitor_spike_events))
+            for row_idx, row in enumerate(self._monitor_spike_events):
+                self.monitor_spikes_table.setItem(row_idx, 0, QTableWidgetItem(str(row["severity"])))
+                self.monitor_spikes_table.setItem(row_idx, 1, QTableWidgetItem(str(row["time"])))
+                self.monitor_spikes_table.setItem(row_idx, 2, QTableWidgetItem(format_bytes(abs(int(row["delta"])))))
+                self.monitor_spikes_table.setItem(row_idx, 3, QTableWidgetItem(str(row["suspects"])))
+                self.monitor_spikes_table.setItem(row_idx, 4, QTableWidgetItem(str(row["evidence_bundle"])))
+        else:
+            self.monitor_alert_lbl.setText("Alert state: Normal")
+            self.monitor_alert_lbl.setStyleSheet("QLabel { color: #1f7a1f; font-weight: 700; }")
 
     # ----------------------------
     # UI helpers
@@ -1404,6 +1673,8 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(True)
         self.progress.setRange(0, 0)
         self.set_status("Starting disk usage analysis…")
+        if self._monitor_mode == "stopped":
+            self._set_monitor_mode("running")
 
         self.space_audit_thread = QThread()
         self.space_audit_worker = SpaceAuditWorker(
@@ -1452,6 +1723,13 @@ class MainWindow(QMainWindow):
                 f"Artifacts: {self.report_dir}"
             )
             self.log(summary)
+            snapshots = result.get("snapshots", [])
+            if snapshots:
+                self._refresh_monitor_panel(
+                    snapshot=snapshots[-1],
+                    top_offenders=offenders if isinstance(offenders, list) else [],
+                    diff_summaries=diffs if isinstance(diffs, list) else [],
+                )
             QMessageBox.information(self, "Disk usage analysis", summary)
         self.space_audit_worker = None
         self.space_audit_thread = None

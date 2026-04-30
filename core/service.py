@@ -10,8 +10,9 @@ from typing import Any, Callable, Optional
 from core.actions import build_prune_plan, execute_prune_plan
 from core.hash_index import find_duplicates as hash_find_duplicates
 from core.models import DuplicateResultGroup, ScanRequest
+from core.ai.policy_firewall import enforce_plan_compliance
 from core.protection_policy import evaluate_delete_permission
-from core.space_audit import sample_free_space_timeline
+from core.space_audit import sample_correlated_space_timeline, sample_free_space_timeline
 from config.protection_loader import DEFAULT_TOML, resolve_protection_config
 from dupe_core import (
     DupeGroup,
@@ -78,7 +79,14 @@ def scan_to_db(
     min_size: int = 1,
     compare_mode: bool = False,
     scan_error_log_path: Path | None = None,
+    checkpoint_path: Path | None = None,
 ) -> dict[str, Any]:
+    def _never_cancel() -> bool:
+        return False
+
+    def _ignore_metrics(_: dict) -> None:
+        return None
+
     if compare_mode and len(roots) >= 2:
         return scan_roots_to_db(
             db_path=db_path,
@@ -89,6 +97,7 @@ def scan_to_db(
             cancel_flag=lambda: False,
             metrics_cb=lambda _m: None,
             scan_error_log_path=scan_error_log_path,
+            checkpoint_path=checkpoint_path,
         )
     return scan_root_to_db(
         db_path=db_path,
@@ -99,6 +108,7 @@ def scan_to_db(
         cancel_flag=lambda: False,
         metrics_cb=lambda _m: None,
         scan_error_log_path=scan_error_log_path,
+        checkpoint_path=checkpoint_path,
     )
 
 
@@ -119,6 +129,12 @@ def run_free_space_watchdog(
     duration_seconds: float | None,
     max_rows: int | None,
     spike_threshold_bytes: int | None,
+    enable_local_notifications: bool = False,
+    alerts_feed_path: Path | None = None,
+    hash_usernames: bool = False,
+    hash_filenames: bool = False,
+    hash_process_arguments: bool = False,
+    local_only_mode: bool = False,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +145,36 @@ def run_free_space_watchdog(
         duration_seconds=duration_seconds,
         max_rows=max_rows,
         free_space_drop_spike_threshold_bytes=spike_threshold_bytes,
+        enable_local_notifications=enable_local_notifications,
+        alerts_feed_path=alerts_feed_path,
+        hash_usernames=hash_usernames,
+        hash_filenames=hash_filenames,
+        hash_process_arguments=hash_process_arguments,
+        local_only_mode=local_only_mode,
+        cancel_flag=cancel_flag,
+    )
+
+
+def run_correlated_space_watchdog(
+    root: Path,
+    report_dir: Path,
+    fast_interval_seconds: float,
+    growth_interval_seconds: float,
+    duration_seconds: float | None,
+    max_fast_rows: int | None,
+    max_growth_rows: int | None,
+    cancel_flag: Any | None = None,
+) -> dict[str, Any]:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    return sample_correlated_space_timeline(
+        root=root,
+        output_fast_csv=report_dir / "free_space_timeline_fast.csv",
+        output_growth_csv=report_dir / "space_growth_timeline.csv",
+        fast_interval_seconds=fast_interval_seconds,
+        growth_interval_seconds=growth_interval_seconds,
+        duration_seconds=duration_seconds,
+        max_fast_rows=max_fast_rows,
+        max_growth_rows=max_growth_rows,
         cancel_flag=cancel_flag,
     )
 
@@ -148,7 +194,13 @@ def serialize_dupes(groups: list[DupeGroup]) -> list[dict[str, Any]]:
     return out
 
 
-def plan_prune(groups: list[DupeGroup], source_id: str = "unknown") -> dict[str, Any]:
+def plan_prune(
+    groups: list[DupeGroup],
+    source_id: str = "unknown",
+    enforce_safe_delete_roots: bool = False,
+    safe_delete_roots: list[Path] | None = None,
+    policy_path: Path | None = None,
+) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     bytes_reclaimable = 0
     for g in groups:
@@ -168,17 +220,31 @@ def plan_prune(groups: list[DupeGroup], source_id: str = "unknown") -> dict[str,
             })
             bytes_reclaimable += f.size
 
+    policy_cfg = resolve_protection_config(policy_path or DEFAULT_TOML)
+    policy_cfg = replace(policy_cfg, enforce_safe_delete_roots=enforce_safe_delete_roots)
+
+    compliance = enforce_plan_compliance(
+        actions,
+        policy=policy_cfg,
+        enforce_safe_delete_roots=enforce_safe_delete_roots,
+        safe_delete_roots=safe_delete_roots,
+    )
+
     plan = {
         "schema": "plan-prune",
         "metadata": {
             "plan_version": PRUNE_PLAN_SCHEMA_VERSION,
             "generated_at": _utc_now_iso(),
             "source_id": source_id,
+            "policy_firewall": {
+                "violations": compliance["violations"],
+                "rewritten": compliance["rewritten_actions"],
+            },
         },
         "groups": len(groups),
-        "actions": actions,
-        "files_to_prune": len(actions),
-        "bytes_reclaimable": bytes_reclaimable,
+        "actions": compliance["safe_actions"],
+        "files_to_prune": len(compliance["safe_actions"]),
+        "bytes_reclaimable": sum(int(a.get("size", 0)) for a in compliance["safe_actions"]),
         "dry_run_default": True,
     }
     plan["plan_checksum"] = _sha256_json(plan)
@@ -268,6 +334,16 @@ def apply_prune(
                         matched_rule="allow_default",
                     ),
                 )
+            continue
+        try:
+            windows_recycle([str(p)])
+            results["applied"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "ok"})
+        except Exception:
+            results["errors"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "error", "reason_code": "recycle_failed"})
             continue
 
         if action_mode in {"recycle", "delete", "move"}:
