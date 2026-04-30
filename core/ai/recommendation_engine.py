@@ -26,9 +26,12 @@ class RecommendationConfig:
 @dataclass(frozen=True)
 class AIExecutionConfig:
     model_routing: dict[str, str]
+    routing_policy: str = "hybrid"
     token_budget_per_run: int = 4000
     time_budget_ms: int = 3000
     max_analysis_window: int = 3
+    per_recommendation_token_budget: int = 700
+    per_recommendation_latency_budget_ms: int = 800
 
 
 @dataclass
@@ -38,6 +41,12 @@ class _RunTelemetry:
     llm_calls: int = 0
     cache_hits: int = 0
     fallback_count: int = 0
+    latency_ms_total: int = 0
+    failure_modes: dict[str, int] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.failure_modes is None:
+            self.failure_modes = {}
 
 
 DEFAULT_CONFIG = RecommendationConfig(
@@ -143,6 +152,19 @@ def _offline_summary(rec: dict[str, Any], route: str) -> str:
         f"risk={rec['risk_tier']} ({rec['risk_score']:.2f}) | "
         f"reclaim={rec['reclaim_opportunity_score']:.2f}"
     )
+
+
+def _choose_provider_route(candidate: dict[str, Any], execution_config: AIExecutionConfig) -> str:
+    task_type = str(candidate.get("task_type", "risk_assessment"))
+    configured = execution_config.model_routing.get(task_type, "local")
+    policy = str(execution_config.routing_policy or "hybrid").lower()
+    if policy == "local":
+        return "local"
+    if policy == "cloud":
+        return "cloud"
+    if configured in {"local", "cloud"}:
+        return configured
+    return "hybrid"
 
 
 def _sanitize_evidence_link(value: Any) -> str | None:
@@ -268,7 +290,7 @@ def build_recommendations(
         rec["approval_workflow"] = _build_approval_workflow(rec["action_steps"])
         rec["handoff_ready"] = rec["approval_workflow"]["state"] == "handoff_ready"
 
-        route = execution_config.model_routing.get(str(candidate.get("task_type", "risk_assessment")), "local")
+        route = _choose_provider_route(candidate, execution_config)
         rec["model_route"] = route
 
         proposed_action = candidate.get("proposed_action") if isinstance(candidate.get("proposed_action"), dict) else None
@@ -312,9 +334,11 @@ def build_recommendations(
 
         elapsed_ms = int((time.perf_counter() - run_started) * 1000)
         budget_exceeded = telemetry.tokens_used >= execution_config.token_budget_per_run or elapsed_ms >= execution_config.time_budget_ms
+        started = time.perf_counter()
+        candidate_token_budget_exceeded = telemetry.tokens_used >= ((idx + 1) * execution_config.per_recommendation_token_budget)
 
         try:
-            if rationale_generator and not budget_exceeded:
+            if rationale_generator and not budget_exceeded and not candidate_token_budget_exceeded:
                 rec["rationale"] = rationale_generator(rec)
                 rec["rationale_mode"] = "llm"
                 telemetry.llm_calls += 1
@@ -328,11 +352,18 @@ def build_recommendations(
             rec["rationale"] = _offline_summary(rec, route)
             rec["rationale_mode"] = "fallback_non_llm"
             telemetry.fallback_count += 1
+            telemetry.failure_modes["provider_error"] = telemetry.failure_modes.get("provider_error", 0) + 1
 
-        if budget_exceeded and rec["rationale_mode"] != "fallback_non_llm":
+        rec_latency_ms = int((time.perf_counter() - started) * 1000)
+        telemetry.latency_ms_total += rec_latency_ms
+        if rec_latency_ms > execution_config.per_recommendation_latency_budget_ms:
+            telemetry.failure_modes["latency_budget_exceeded"] = telemetry.failure_modes.get("latency_budget_exceeded", 0) + 1
+
+        if (budget_exceeded or candidate_token_budget_exceeded) and rec["rationale_mode"] != "fallback_non_llm":
             rec["rationale"] = _offline_summary(rec, route)
             rec["rationale_mode"] = "budget_offline_fallback"
             telemetry.fallback_count += 1
+            telemetry.failure_modes["token_budget_exceeded"] = telemetry.failure_modes.get("token_budget_exceeded", 0) + 1
 
         cache[evidence_key] = {
             "rationale": rec["rationale"],
@@ -369,13 +400,19 @@ def build_recommendations(
                 "time_budget_ms": execution_config.time_budget_ms,
                 "max_analysis_window": execution_config.max_analysis_window,
                 "model_routing": dict(execution_config.model_routing),
+                "routing_policy": execution_config.routing_policy,
+                "per_recommendation_token_budget": execution_config.per_recommendation_token_budget,
+                "per_recommendation_latency_budget_ms": execution_config.per_recommendation_latency_budget_ms,
             },
             "telemetry": {
                 "tokens_used": telemetry.tokens_used,
                 "estimated_cost_usd": round(telemetry.estimated_cost_usd, 8),
                 "llm_calls": telemetry.llm_calls,
                 "cache_hits": telemetry.cache_hits,
+                "cache_hit_rate": (telemetry.cache_hits / len(candidates)) if candidates else 0.0,
                 "fallback_count": telemetry.fallback_count,
+                "latency_ms": telemetry.latency_ms_total,
+                "failure_modes": dict(telemetry.failure_modes),
                 "elapsed_ms": int((time.perf_counter() - run_started) * 1000),
             },
         },
