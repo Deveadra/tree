@@ -38,7 +38,9 @@ def _build_export_tiers(evidence: dict[str, Any], policy: dict[str, str]) -> dic
     full_payload = deepcopy(evidence)
     share_safe = deepcopy(evidence)
     share_safe["export_tier"] = "share_safe_redacted"
+    share_safe["report_redaction_level"] = "share_safe"
     share_safe["redaction_policy"] = policy
+    full_payload["report_redaction_level"] = "full"
     return {
         "full_forensic_report": {"export_tier": "full_forensic_report", "payload": full_payload},
         "share_safe_redacted_report": {"export_tier": "share_safe_redacted", "payload": share_safe},
@@ -75,6 +77,7 @@ def build_normalized_evidence(
     ts = str(disk_metrics_payload.get("timestamp") or _utc_now_iso())
     policy = _redaction_policy(redaction_policy)
     evidence: dict[str, Any] = {
+        "report_redaction_level": "full",
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
         "event_id": event_id,
@@ -103,6 +106,7 @@ def build_normalized_evidence(
         ],
     }
     evidence["export_tiers"] = _build_export_tiers(evidence, policy)
+    evidence["report_redaction_level"] = "full"
     validate_evidence_schema(evidence)
     return evidence
 

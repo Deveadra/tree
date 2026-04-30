@@ -99,6 +99,22 @@ def test_recommendations_include_redaction_impact_notes() -> None:
     assert "usernames" in rec["redaction_impact"]["hidden_fields"]
 
 
+def test_recommendation_includes_explanation_action_plan_and_approval_workflow():
+    evidence = _sample_evidence()
+    evidence["recommendation_candidates"][0]["evidence_links"] = [
+        "https://example.com/metrics/1",
+        "javascript:alert(1)",
+    ]
+    evidence["recommendation_candidates"][0]["alternate_hypotheses"] = ["Could be temp-file churn."]
+
+    out = build_recommendations(evidence)
+    rec = out["recommendations"][0]
+
+    assert rec["explanation_payload"]["feature_evidence_links"] == ["https://example.com/metrics/1"]
+    assert rec["explanation_payload"]["alternate_hypotheses"]
+    assert rec["action_plan"]["guardrails"]["rollback_steps_required"] is True
+    assert rec["approval_workflow"]["requires_explicit_confirmation_before_handoff"] is True
+    assert rec["handoff_ready"] is False
 def test_candidates_include_confidence_and_policy_validation() -> None:
     evidence = _sample_evidence()
     evidence["recommendation_candidates"][0]["proposed_action"] = {
