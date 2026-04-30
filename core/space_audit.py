@@ -11,7 +11,12 @@ import errno
 import os
 import time
 import tempfile
-import resource
+import sys
+
+if sys.platform != "win32":
+    import resource as _resource
+else:
+    _resource = None
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix
@@ -939,10 +944,11 @@ def sample_correlated_space_timeline(
     growth_path = Path(output_growth_csv)
     safe_mkdir(fast_path.parent)
     safe_mkdir(growth_path.parent)
-    if max_cpu_seconds is not None and max_cpu_seconds > 0:
-        resource.setrlimit(resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
-    if max_memory_bytes is not None and max_memory_bytes > 0:
-        resource.setrlimit(resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
+    if _resource is not None:
+        if max_cpu_seconds is not None and max_cpu_seconds > 0:
+            _resource.setrlimit(_resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
+        if max_memory_bytes is not None and max_memory_bytes > 0:
+            _resource.setrlimit(_resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
 
     start_mono = time.monotonic()
     next_fast = start_mono
