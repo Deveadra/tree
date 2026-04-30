@@ -15,6 +15,7 @@ from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 import traceback
 import time
+import threading
 
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -84,6 +85,15 @@ from dupe_core import (
     new_run_id,
 )
 from core.models import ScanRequest
+from core.space_audit import (
+    diff_space_snapshots,
+    resolve_previous_snapshot,
+    scan_space_usage,
+    summarize_by_extension,
+    summarize_top_dirs,
+    write_space_reports,
+)
+from config.protection_loader import DEFAULT_TOML
 from core.protection_policy import evaluate_delete_permission
 from core.service import (
     build_prune_plan,
@@ -247,6 +257,7 @@ class ScanWorker(QObject):
                     compare_mode=True,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
                     checkpoint_path=self.report_dir / "checkpoint_scan.json",
+                )
                 scan_stats = scan_stats_full.get("combined") or {
                     "listed": 0,
                     "indexed": 0,
@@ -332,7 +343,6 @@ class ScanWorker(QObject):
                 except Exception:
                     pass
 
-            dupes = load_dupes(
             dupes = find_duplicates(
                 db_path=db_path,
                 cancel_flag=self._cancel_flag,
@@ -397,6 +407,85 @@ class ScanWorker(QObject):
             except Exception:
                 pass
             self.error.emit(str(e))
+
+
+class SpaceAuditWorker(QObject):
+    error = Signal(str)
+    finished = Signal(object)  # dict[str, Any]
+    metrics = Signal(object)  # dict
+    progress = Signal(int, int)  # current, total
+    status = Signal(str)
+    cancel = Signal(str)
+
+    def __init__(self, roots: list[Path], report_dir: Path, excludes: set[str], policy_path: Path):
+        super().__init__()
+        self.roots = roots
+        self.report_dir = report_dir
+        self.excludes = excludes
+        self.policy_path = policy_path
+        self._cancel_event = threading.Event()
+
+    def cancel_run(self, reason: str = "user_cancelled") -> None:
+        self._cancel_event.set()
+        self.cancel.emit(reason)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            safe_mkdir(self.report_dir)
+            snapshots: list[dict] = []
+            all_top_dirs: list[dict] = []
+            warnings: list[dict] = []
+            diff_summaries: list[dict] = []
+            self.progress.emit(0, max(1, len(self.roots)))
+            for idx, root in enumerate(self.roots, start=1):
+                if self._cancel_event.is_set():
+                    self.status.emit("Disk usage analysis cancelled.")
+                    self.finished.emit({"cancelled": True})
+                    return
+                self.status.emit(f"Analyzing disk usage: {root}")
+                snapshot = scan_space_usage(
+                    root=root,
+                    excludes=self.excludes,
+                    cancel_flag=self._cancel_event,
+                    metrics_cb=self.metrics.emit,
+                    policy_path=self.policy_path,
+                )
+                top_dirs = summarize_top_dirs(snapshot, top_n=12)
+                by_ext = summarize_by_extension(snapshot, top_n=30)
+                prev = resolve_previous_snapshot(self.report_dir.parent, self.report_dir, root)
+                diff = diff_space_snapshots(snapshot, prev, noise_threshold_bytes=0) if prev else None
+                write_space_reports(
+                    report_dir=self.report_dir,
+                    snapshot=snapshot,
+                    top_dirs=top_dirs,
+                    by_ext=by_ext,
+                    diff=diff,
+                )
+                snapshots.append(snapshot)
+                all_top_dirs.extend([{"root": str(root), **row} for row in top_dirs[:5]])
+                warnings.extend(snapshot.get("protection", {}).get("skipped_regions", [])[:20])
+                if diff:
+                    diff_summaries.append(
+                        {
+                            "root": str(root),
+                            "net_change_bytes": int(diff.get("summary", {}).get("net_change_bytes", 0)),
+                        }
+                    )
+                self.progress.emit(idx, len(self.roots))
+
+            self.status.emit("Disk usage analysis complete.")
+            self.finished.emit(
+                {
+                    "cancelled": False,
+                    "snapshots": snapshots,
+                    "top_offenders": sorted(all_top_dirs, key=lambda row: int(row.get("bytes", 0)), reverse=True)[:10],
+                    "warnings": warnings,
+                    "diff_summaries": diff_summaries,
+                }
+            )
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class PrefixSuggestDialog(QDialog):
@@ -678,6 +767,7 @@ class MainWindow(QMainWindow):
         )
 
         self.start_btn = QPushButton("Start scan")
+        self.space_audit_btn = QPushButton("Analyze disk usage…")
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
 
@@ -787,6 +877,7 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.space_audit_btn)
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.load_btn)
         btn_row.addWidget(self.open_reports_btn)
@@ -893,6 +984,7 @@ class MainWindow(QMainWindow):
         self.trash_folder_btn.clicked.connect(self.pick_trash_dir)
 
         self.start_btn.clicked.connect(self.start_scan)
+        self.space_audit_btn.clicked.connect(self.start_space_audit)
         self.cancel_btn.clicked.connect(self.cancel_scan)
         self.load_btn.clicked.connect(self.load_previous_scan)
         self.open_reports_btn.clicked.connect(self.open_current_report_folder)
@@ -909,6 +1001,8 @@ class MainWindow(QMainWindow):
 
         self.worker_thread: Optional[QThread] = None
         self.worker: Optional[ScanWorker] = None
+        self.space_audit_thread: Optional[QThread] = None
+        self.space_audit_worker: Optional[SpaceAuditWorker] = None
 
         # Cache for compiled excludes (used by deletion safety checks)
         self._ex_cache_raw: Optional[str] = None
@@ -1282,6 +1376,99 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.cancel("user_cancelled")
             self.set_status("Cancel requested…")
+        if self.space_audit_worker:
+            self.space_audit_worker.cancel_run("user_cancelled")
+            self.set_status("Disk usage analysis cancellation requested…")
+
+    def start_space_audit(self) -> None:
+        root_a_txt = self.root_edit.text().strip()
+        if not root_a_txt:
+            QMessageBox.warning(self, "Missing root", "Please choose Root A first.")
+            return
+        roots: list[Path] = [Path(root_a_txt)]
+        if self.compare_mode_chk.isChecked() and self.root2_edit.text().strip():
+            roots.append(Path(self.root2_edit.text().strip()))
+        roots = [r for r in roots if r.exists()]
+        if not roots:
+            QMessageBox.warning(self, "Invalid root", "No valid root path is available for analysis.")
+            return
+        excludes = {s.strip() for s in (self.exclude_edit.text() or "").split(",") if s.strip()}
+        if not excludes:
+            excludes = set(DEFAULT_EXCLUDES)
+        if not self.report_dir or self.report_dir == self.reports_root:
+            self.report_dir = self._make_run_report_dir(self._reports_root_dir(), roots[0])
+        safe_mkdir(self.report_dir)
+
+        self.start_btn.setEnabled(False)
+        self.space_audit_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.progress.setRange(0, 0)
+        self.set_status("Starting disk usage analysis…")
+
+        self.space_audit_thread = QThread()
+        self.space_audit_worker = SpaceAuditWorker(
+            roots=roots,
+            report_dir=self.report_dir,
+            excludes=excludes,
+            policy_path=Path(DEFAULT_TOML),
+        )
+        self.space_audit_worker.moveToThread(self.space_audit_thread)
+        self.space_audit_thread.started.connect(self.space_audit_worker.run)
+        self.space_audit_worker.status.connect(self.set_status)
+        self.space_audit_worker.metrics.connect(self.on_metrics)
+        self.space_audit_worker.progress.connect(self.on_progress)
+        self.space_audit_worker.finished.connect(self.on_space_audit_finished)
+        self.space_audit_worker.error.connect(self.on_space_audit_error)
+        self.space_audit_thread.start()
+
+    @Slot(object)
+    def on_space_audit_finished(self, result_obj: object) -> None:
+        if self.space_audit_thread:
+            self.space_audit_thread.quit()
+            self.space_audit_thread.wait()
+        self.start_btn.setEnabled(True)
+        self.space_audit_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        result = result_obj if isinstance(result_obj, dict) else {}
+        if result.get("cancelled"):
+            self.set_status("Disk usage analysis cancelled.")
+        else:
+            offenders = result.get("top_offenders", [])
+            warnings = result.get("warnings", [])
+            diffs = result.get("diff_summaries", [])
+            net = sum(int(d.get("net_change_bytes", 0)) for d in diffs)
+            top_lines = "\n".join(
+                f"• {row.get('root')} :: {row.get('path')} — {format_bytes(int(row.get('bytes', 0)))}"
+                for row in offenders[:5]
+            ) or "• none"
+            warn_line = f"{len(warnings)} protected/skipped entries recorded."
+            summary = (
+                "Disk usage analysis complete.\n\n"
+                f"Top offenders:\n{top_lines}\n\n"
+                f"Net change vs previous snapshot: {format_bytes(net)}\n"
+                f"Warnings/skipped protected areas: {warn_line}\n\n"
+                f"Artifacts: {self.report_dir}"
+            )
+            self.log(summary)
+            QMessageBox.information(self, "Disk usage analysis", summary)
+        self.space_audit_worker = None
+        self.space_audit_thread = None
+
+    @Slot(str)
+    def on_space_audit_error(self, err: str) -> None:
+        if self.space_audit_thread:
+            self.space_audit_thread.quit()
+            self.space_audit_thread.wait()
+        self.start_btn.setEnabled(True)
+        self.space_audit_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        QMessageBox.critical(self, "Disk usage analysis error", err)
+        self.space_audit_worker = None
+        self.space_audit_thread = None
 
     @Slot(int, int)
     def on_progress(self, cur: int, total: int) -> None:
