@@ -72,6 +72,7 @@ from dupe_core import (
     fmt_duration,
     fmt_time,
     format_bytes,
+    new_run_id,
     safe_mkdir,
     scan_root_to_db,
     scan_roots_to_db,
@@ -80,6 +81,7 @@ from dupe_core import (
     windows_recycle,
     write_scan_reports,
     write_path_suggestions,
+    write_run_summary,
 )
 
 
@@ -127,9 +129,12 @@ class ScanWorker(QObject):
         self.follow_symlinks = follow_symlinks
         self.min_size = min_size
         self._cancel = False
+        self._cancel_reason = ""
+        self.run_id = self.report_dir.name
 
-    def cancel(self) -> None:
+    def cancel(self, reason: str = "user_requested") -> None:
         self._cancel = True
+        self._cancel_reason = reason
 
     def _cancel_flag(self) -> bool:
         return self._cancel
@@ -143,6 +148,7 @@ class ScanWorker(QObject):
 
             meta_path = self.report_dir / "run_meta.json"
             meta: dict = {
+                "run_id": self.run_id,
                 "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "roots": [str(r) for r in self.roots],
                 "compare_mode": bool(self.compare_mode),
@@ -155,8 +161,14 @@ class ScanWorker(QObject):
                 "dupe_groups": None,
                 "finished_at": None,
                 "elapsed_s": None,
-                "status": "started",
+                "status": "created",
+                "cancel_reason": None,
             }
+            try:
+                write_json_atomic(meta_path, meta)
+            except Exception:
+                pass
+            meta["status"] = "scanning"
             try:
                 write_json_atomic(meta_path, meta)
             except Exception:
@@ -183,6 +195,7 @@ class ScanWorker(QObject):
                     cancel_flag=self._cancel_flag,
                     metrics_cb=push,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
+                    checkpoint_path=self.report_dir / "checkpoint_scan.json",
                 )
                 scan_stats = scan_stats_full.get("combined") or {
                     "listed": 0,
@@ -201,6 +214,7 @@ class ScanWorker(QObject):
                     cancel_flag=self._cancel_flag,
                     metrics_cb=push,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
+                    checkpoint_path=self.report_dir / "checkpoint_scan.json",
                 )
 
             # Count how many size-groups will be hashed
@@ -218,17 +232,23 @@ class ScanWorker(QObject):
 
             meta["scan_stats"] = scan_stats
             meta["size_groups_total"] = size_groups_total
-            meta["status"] = "scanned"
+            meta["status"] = "indexed"
             try:
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
 
             if self._cancel_flag():
+                meta["status"] = "cancelled"
+                meta["cancel_reason"] = self._cancel_reason or "cancelled_during_scan"
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
                 self.status.emit("Cancelled during scan.")
                 self.finished.emit([])
                 return
 
+            meta["status"] = "planned"
+            write_json_atomic(meta_path, meta)
             self.status.emit("Finding duplicates (size + SHA-256)...")
 
             try:
@@ -268,16 +288,21 @@ class ScanWorker(QObject):
                 required_roots=(
                     (0, 1) if (self.compare_mode and len(self.roots) >= 2) else None
                 ),
+                checkpoint_path=self.report_dir / "checkpoint_hash.json",
             )
 
             meta["dupe_groups"] = len(dupes)
-            meta["status"] = "hashed"
+            meta["status"] = "applying"
             try:
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
 
             if self._cancel_flag():
+                meta["status"] = "cancelled"
+                meta["cancel_reason"] = self._cancel_reason or "cancelled_during_hash"
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
                 self.status.emit("Cancelled during hashing.")
                 self.finished.emit([])
                 return
@@ -292,9 +317,10 @@ class ScanWorker(QObject):
 
             meta["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             meta["elapsed_s"] = float(time.time() - t0)
-            meta["status"] = "done"
+            meta["status"] = "completed"
             try:
                 write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
             except Exception:
                 pass
 
@@ -306,6 +332,13 @@ class ScanWorker(QObject):
             self.finished.emit(dupes)
 
         except Exception as e:
+            try:
+                meta["status"] = "failed"
+                meta["error"] = str(e)
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+            except Exception:
+                pass
             self.error.emit(str(e))
 
 
@@ -871,10 +904,11 @@ class MainWindow(QMainWindow):
             return tag[:40] if tag else "scan"
 
         stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        run_id = new_run_id()[:12]
         tag = scan_root.name or scan_root.drive or "scan"
         tag = safe_tag(tag)
 
-        base = f"{stamp}_{tag}"
+        base = f"{stamp}_{tag}_{run_id}"
         run_dir = reports_root / base
 
         n = 1
@@ -1173,7 +1207,7 @@ class MainWindow(QMainWindow):
 
     def cancel_scan(self) -> None:
         if self.worker:
-            self.worker.cancel()
+            self.worker.cancel("user_cancelled")
             self.set_status("Cancel requested…")
 
     @Slot(int, int)

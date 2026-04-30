@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Optional
+from uuid import uuid4
 
 
 # ----------------------------
@@ -314,6 +315,26 @@ def write_json_atomic(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+RUN_STATES = {
+    "created",
+    "scanning",
+    "indexed",
+    "planned",
+    "applying",
+    "completed",
+    "failed",
+    "cancelled",
+}
+
+
+def new_run_id() -> str:
+    return uuid4().hex
+
+
+def write_run_summary(report_dir: Path, summary: dict) -> None:
+    write_json_atomic(report_dir / "run_summary.json", summary)
+
+
 def _db_create_schema(con: sqlite3.Connection) -> None:
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
@@ -514,6 +535,7 @@ def scan_roots_to_db(
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> dict:
     """
     Scan multiple roots into one DB. root_id is assigned by index in `roots`.
@@ -548,6 +570,14 @@ def scan_roots_to_db(
                 scan_error_log_path=scan_error_log_path,
             )
             per_root.append({"root_id": rid, "root": str(r), **st})
+            if checkpoint_path:
+                try:
+                    write_json_atomic(
+                        checkpoint_path,
+                        {"last_scanned_root_id": rid, "root": str(r), "stats": st},
+                    )
+                except Exception:
+                    pass
             for k in combined.keys():
                 combined[k] += int(st.get(k, 0))
 
@@ -566,6 +596,7 @@ def scan_root_to_db(
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> dict:
     """
     Backward compatible single-root scan. Uses the new schema (includes root_id).
@@ -579,6 +610,7 @@ def scan_root_to_db(
         cancel_flag=cancel_flag,
         metrics_cb=metrics_cb,
         scan_error_log_path=scan_error_log_path,
+        checkpoint_path=checkpoint_path,
     )
     return r.get("combined") or {"listed": 0, "indexed": 0, "skipped": 0, "errors": 0}
 
@@ -589,6 +621,7 @@ def find_dupes_from_db(
     metrics_cb: Callable[[dict], None],
     error_log_path: Optional[Path] = None,
     required_roots: Optional[tuple[int, int]] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> list[DupeGroup]:
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
@@ -679,7 +712,18 @@ def find_dupes_from_db(
 
         emit(force=True)
 
+        last_done_size = None
+        if checkpoint_path and checkpoint_path.exists():
+            try:
+                ck = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                last_done_size = ck.get("last_done_size")
+            except Exception:
+                last_done_size = None
+
         for i, size in enumerate(sizes, start=1):
+            if last_done_size is not None and int(size) <= int(last_done_size):
+                done_groups = i
+                continue
             if cancel_flag():
                 break
 
@@ -757,6 +801,14 @@ def find_dupes_from_db(
                     )
 
             done_groups = i
+            if checkpoint_path:
+                try:
+                    write_json_atomic(
+                        checkpoint_path,
+                        {"last_done_size": int(size), "done_groups": int(done_groups)},
+                    )
+                except Exception:
+                    pass
             emit()
 
         emit(force=True)
