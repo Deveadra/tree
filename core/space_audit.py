@@ -11,13 +11,20 @@ import errno
 import os
 import time
 import tempfile
-import resource
+import sys
+
+if sys.platform != "win32":
+    import resource as _resource
+else:
+    _resource = None
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix, is_within_safe_delete_roots
 
 from dupe_core import safe_mkdir, write_json_atomic
+from core.ai.evidence_builder import build_normalized_evidence, persist_normalized_evidence
 from core.space_categories import classify_path
+from core.collector_plugins import load_collector_plugins, run_plugins_safely
 
 SCHEMA_VERSION = "1.1"
 
@@ -26,6 +33,78 @@ ErrorCallback = Callable[[dict[str, Any]], None]
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sha_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _redact_path_string(value: str, hash_usernames: bool, hash_filenames: bool) -> str:
+    parts = value.replace("\\", "/").split("/")
+    redacted: list[str] = []
+    for idx, part in enumerate(parts):
+        token = part
+        if hash_usernames and idx > 0 and parts[idx - 1].lower() in {"users", "home"} and part:
+            token = f"user:{_sha_token(part)}"
+        if hash_filenames and idx == len(parts) - 1 and "." in part:
+            token = f"file:{_sha_token(part)}"
+        redacted.append(token)
+    return "/".join(redacted)
+
+
+def _is_path_key(key: str) -> bool:
+    normalized = key.lower()
+    if normalized in {"path", "target", "dir", "file", "filename", "safe_delete_roots", "protected_prefixes"}:
+        return True
+    return normalized.endswith("_path") or normalized.endswith("_paths")
+
+
+def _apply_redaction_payload(
+    payload: Any,
+    *,
+    hash_usernames: bool,
+    hash_filenames: bool,
+    hash_process_arguments: bool,
+    parent_key: str | None = None,
+) -> Any:
+    if isinstance(payload, dict):
+        out: dict[str, Any] = {}
+        for k, v in payload.items():
+            key = str(k).lower()
+            if isinstance(v, str):
+                if hash_process_arguments and key in {"cmdline", "args", "command", "command_line"}:
+                    out[k] = f"args:{_sha_token(v)}"
+                elif _is_path_key(key):
+                    out[k] = _redact_path_string(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames)
+                else:
+                    out[k] = v
+            else:
+                out[k] = _apply_redaction_payload(
+                    v,
+                    hash_usernames=hash_usernames,
+                    hash_filenames=hash_filenames,
+                    hash_process_arguments=hash_process_arguments,
+                    parent_key=key,
+                )
+        return out
+    if isinstance(payload, list):
+        out_list: list[Any] = []
+        path_like_list = bool(parent_key and _is_path_key(parent_key))
+        for item in payload:
+            if isinstance(item, str) and path_like_list:
+                out_list.append(_redact_path_string(item, hash_usernames=hash_usernames, hash_filenames=hash_filenames))
+            else:
+                out_list.append(
+                    _apply_redaction_payload(
+                        item,
+                        hash_usernames=hash_usernames,
+                        hash_filenames=hash_filenames,
+                        hash_process_arguments=hash_process_arguments,
+                        parent_key=parent_key,
+                    )
+                )
+        return out_list
+    return payload
 
 
 def _is_excluded(path: Path, root: Path, excludes: set[str]) -> bool:
@@ -334,7 +413,7 @@ def resolve_previous_snapshot(report_root: str | Path, current_report_dir: str |
     candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
     for snapshot_path in root.glob("**/space_snapshot.json"):
         snapshot_dir = snapshot_path.parent.resolve()
-        if snapshot_dir == current:
+        if snapshot_dir == current and root != current:
             continue
         try:
             data = json.loads(snapshot_path.read_text(encoding="utf-8"))
@@ -563,7 +642,9 @@ def _write_text_atomic(path: Path, text: str) -> None:
 
 def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
     """Learn normal free-space oscillation for a volume and return threshold profile."""
-    samples = max(2, int(duration_minutes * 60))
+    duration_seconds = max(0.0, float(duration_minutes) * 60.0)
+    samples = max(2, int(duration_seconds) + 1)
+    sleep_seconds = duration_seconds / (samples - 1)
     previous_free: int | None = None
     deltas: list[int] = []
     for _ in range(samples):
@@ -572,7 +653,8 @@ def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
         if previous_free is not None:
             deltas.append(abs(int(free - previous_free)))
         previous_free = free
-        time.sleep(0.0)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
 
     if deltas:
         sorted_deltas = sorted(deltas)
@@ -662,6 +744,16 @@ def export_incident_summary(report_dir: str | Path, replay_view: dict[str, Any])
     out_dir = Path(report_dir)
     safe_mkdir(out_dir)
     path = out_dir / "incident_summary.json"
+    confidence_sections: list[dict[str, Any]] = []
+    ambiguity_sections: list[dict[str, Any]] = []
+    for row in replay_view.get("top_regrowth_sources", []) or []:
+        suspect = row.get("suspect_attribution", {})
+        if isinstance(suspect, dict):
+            if suspect.get("confidence"):
+                confidence_sections.append(suspect.get("confidence", {}))
+            if suspect.get("ambiguity"):
+                ambiguity_sections.append(suspect.get("ambiguity", {}))
+
     write_json_atomic(path, {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
@@ -671,6 +763,8 @@ def export_incident_summary(report_dir: str | Path, replay_view: dict[str, Any])
             "net_change_bytes": replay_view.get("totals", {}).get("net_change_bytes", 0),
             "top_regrowth_sources": replay_view.get("top_regrowth_sources", []),
         },
+        "confidence": confidence_sections,
+        "ambiguity": ambiguity_sections,
     })
     return path
 
@@ -758,21 +852,69 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
         item["evidence"].append({"type": "process_io_delta", "reference": proc, "write_bytes_delta": delta})
 
     ranked = sorted(suspects.values(), key=lambda x: x["score"], reverse=True)
+    evidence_disambiguation_hints = [
+        "Capture per-process file path write samples during the spike window.",
+        "Collect two adjacent snapshots (before/after) with top directory and extension deltas.",
+        "Enable process handle scan to confirm deleted-but-open space retention.",
+    ]
+
+    process_rows = event_window.get("process_io_deltas", []) or []
+    directory_rows = event_window.get("directory_growth_windows", []) or []
+    io_has_direct = any(bool(row.get("direct_writer", False)) for row in process_rows)
+    io_total = sum(max(0, int(row.get("write_bytes_delta", 0))) for row in process_rows)
+    dir_total = sum(max(0, int(row.get("delta_bytes", 0))) for row in directory_rows)
+    contradiction_flags: list[str] = []
+    if io_total == 0 and dir_total > 0:
+        contradiction_flags.append("directory_growth_without_corresponding_process_io")
+    if io_has_direct and dir_total == 0:
+        contradiction_flags.append("process_io_direct_writer_without_directory_growth")
+
+    if contradiction_flags:
+        evidence_disambiguation_hints.append("Increase process IO sampling cadence; current signals conflict.")
+
     for item in ranked:
         score = float(item["score"])
         item["score"] = round(score, 2)
-        if score >= 20:
+        evidence_count = len(item.get("evidence", []))
+        if score >= 20 and evidence_count >= 2 and item["observation"] == "directly_observed_writer":
             item["confidence_tier"] = "high"
-        elif score >= 8:
+        elif score >= 8 and evidence_count >= 2:
             item["confidence_tier"] = "medium"
         else:
             item["confidence_tier"] = "low"
+        if item["confidence_tier"] in {"medium", "low"}:
+            item["alternate_hypotheses"] = [
+                "A background sync/cache process caused the growth.",
+            ]
+
+    confidence_summary = {
+        "tier_criteria": {
+            "high": "directly observed writer + >=2 evidence points + strong correlation score",
+            "medium": "moderate score with >=2 evidence points but incomplete direct attribution",
+            "low": "weak score or sparse/conflicting evidence",
+        },
+        "evidence_completeness": {
+            "directory_growth_windows": len(directory_rows),
+            "extension_surges": len(event_window.get("extension_surges", []) or []),
+            "process_io_deltas": len(process_rows),
+        },
+        "correlation_strength": {
+            "directory_growth_total_bytes": dir_total,
+            "process_io_total_write_bytes": io_total,
+        },
+    }
+    ambiguity_summary = {
+        "contradictions": contradiction_flags,
+        "what_evidence_would_disambiguate_this": evidence_disambiguation_hints,
+    }
 
     return {
         "event_id": event_window.get("event_id"),
         "window_start": event_window.get("window_start"),
         "window_end": event_window.get("window_end"),
         "suspects": ranked,
+        "confidence": confidence_summary,
+        "ambiguity": ambiguity_summary,
     }
 
 
@@ -791,6 +933,10 @@ def sample_free_space_timeline(
     capture_process_file_handles: bool = False,
     enable_local_notifications: bool = False,
     alerts_feed_path: str | Path | None = None,
+    hash_usernames: bool = False,
+    hash_filenames: bool = False,
+    hash_process_arguments: bool = False,
+    local_only_mode: bool = False,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Periodically capture free-space metrics into CSV.
@@ -825,7 +971,8 @@ def sample_free_space_timeline(
     evidence_bundles: list[dict[str, Any]] = []
     non_recovery_events: list[dict[str, Any]] = []
     probable_deleted_open_events: list[dict[str, Any]] = []
-    baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
+    plugin_failures = 0
+    baseline_snapshot: dict[str, Any] | None = None
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
     attribution_reports: list[str] = []
@@ -968,6 +1115,8 @@ def sample_free_space_timeline(
                 event_id = f"{int(time.time())}_{rows_written}"
                 bundle_dir = out_path.parent / f"evidence_bundle_{event_id}"
                 safe_mkdir(bundle_dir)
+                if baseline_snapshot is None:
+                    baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 current_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 diff = diff_space_snapshots(current_snapshot, baseline_snapshot)
                 top_dir_deltas = sorted(
@@ -980,37 +1129,66 @@ def sample_free_space_timeline(
                     key=lambda item: abs(int(item[1])),
                     reverse=True,
                 )[: max(1, int(top_n_deltas))]
-                write_json_atomic(bundle_dir / "disk_metrics.json", {
+                disk_metrics_payload = {
                     "timestamp": _utc_now_iso(),
                     "total_bytes": total,
                     "free_bytes": free,
                     "used_bytes": used,
                     "free_delta_bytes": delta,
                     "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
-                })
-                write_json_atomic(bundle_dir / "top_dir_deltas.json", {"rows": [{"dir": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)} for k, v in top_dir_deltas]})
-                write_json_atomic(bundle_dir / "top_extension_deltas.json", {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]})
-                write_json_atomic(bundle_dir / "process_io_snapshot.json", _collect_io_snapshot())
+                }
+                top_dir_payload = {"rows": [{"dir": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)} for k, v in top_dir_deltas]}
+                top_ext_payload = {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]}
+                process_io_payload = _collect_io_snapshot()
                 deleted_handles = _scan_deleted_open_handles()
-                write_json_atomic(bundle_dir / "process_file_handles.json", deleted_handles)
-                write_json_atomic(bundle_dir / "policy_context.json", {
+                plugin_payload = {"disabled": True, "reason": "local_only_mode"} if local_only_mode else run_plugins_safely(root_path, plugins=load_collector_plugins())
+                plugin_failures += sum(1 for p in plugin_payload.get("plugins", []) if p.get("status") == "failed")
+                policy_context_payload = {
                     "policy_path": str(Path(policy_path).resolve()) if policy_path else str(DEFAULT_TOML),
                     "enforce_safe_delete_roots": bool(protection_cfg.enforce_safe_delete_roots),
                     "safe_delete_roots": list(protection_cfg.safe_delete_roots),
                     "protected_prefixes": list(protection_cfg.protected_prefixes),
                     "protected_dir_names": list(protection_cfg.protected_dir_names),
-                })
+                }
+                full_dir = bundle_dir / "full_detail"
+                safe_dir = bundle_dir / "share_safe"
+                safe_mkdir(full_dir)
+                safe_mkdir(safe_dir)
+                for name, payload in {
+                    "disk_metrics.json": disk_metrics_payload,
+                    "top_dir_deltas.json": top_dir_payload,
+                    "top_extension_deltas.json": top_ext_payload,
+                    "process_io_snapshot.json": process_io_payload,
+                    "process_file_handles.json": deleted_handles,
+                    "plugin_collectors.json": plugin_payload,
+                    "policy_context.json": policy_context_payload,
+                }.items():
+                    write_json_atomic(full_dir / name, payload)
+                    write_json_atomic(
+                        safe_dir / name,
+                        _apply_redaction_payload(payload, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments),
+                    )
+                normalized_evidence = build_normalized_evidence(
+                    run_id=str(int(started_at)),
+                    event_id=event_id,
+                    disk_metrics_payload=disk_metrics_payload,
+                    top_dir_payload=top_dir_payload,
+                    top_ext_payload=top_ext_payload,
+                    process_io_payload=process_io_payload,
+                    process_handles_payload=deleted_handles,
+                    plugin_payload=plugin_payload,
+                    policy_context_payload=policy_context_payload,
+                )
+                persist_normalized_evidence(bundle_dir, normalized_evidence)
                 manifest = {
                     "event_id": event_id,
                     "bundle_dir": str(bundle_dir),
                     "generated_at": _utc_now_iso(),
+                    "local_only_mode": bool(local_only_mode),
+                    "redaction_level": "share_safe_hashed" if (hash_usernames or hash_filenames or hash_process_arguments) else "none",
                     "artifacts": {
-                        "disk_metrics": str(bundle_dir / "disk_metrics.json"),
-                        "top_dir_deltas": str(bundle_dir / "top_dir_deltas.json"),
-                        "top_extension_deltas": str(bundle_dir / "top_extension_deltas.json"),
-                        "process_io_snapshot": str(bundle_dir / "process_io_snapshot.json"),
-                        "process_file_handles": str(bundle_dir / "process_file_handles.json"),
-                        "policy_context": str(bundle_dir / "policy_context.json"),
+                        "full_detail_dir": str(full_dir),
+                        "share_safe_dir": str(safe_dir),
                     },
                 }
                 write_json_atomic(bundle_dir / "bundle_manifest.json", manifest)
@@ -1115,6 +1293,10 @@ def sample_free_space_timeline(
             "non_recovery_despite_deletions": non_recovery_events,
             "probable_deleted_but_open": probable_deleted_open_events,
         },
+        "plugins": {
+            "enabled": True,
+            "failure_count": plugin_failures,
+        },
         "remediation": {
             "safety": "Never force-terminate processes automatically.",
             "recommended_steps": [
@@ -1154,10 +1336,11 @@ def sample_correlated_space_timeline(
     growth_path = Path(output_growth_csv)
     safe_mkdir(fast_path.parent)
     safe_mkdir(growth_path.parent)
-    if max_cpu_seconds is not None and max_cpu_seconds > 0:
-        resource.setrlimit(resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
-    if max_memory_bytes is not None and max_memory_bytes > 0:
-        resource.setrlimit(resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
+    if _resource is not None:
+        if max_cpu_seconds is not None and max_cpu_seconds > 0:
+            _resource.setrlimit(_resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
+        if max_memory_bytes is not None and max_memory_bytes > 0:
+            _resource.setrlimit(_resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
 
     start_mono = time.monotonic()
     next_fast = start_mono

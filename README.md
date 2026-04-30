@@ -230,3 +230,13 @@ GUI steps:
 5. Execute confirmed prune with explicit safety flags.
 6. Capture **post-cleanup scan/report** snapshot.
 7. Compare before/after totals, free-space change, and unattributed bytes; if unattributed growth is high, repeat during a lower-churn window.
+
+## Troubleshooting missing Codex refs
+If automation attempts to fetch a Codex ref that does not yet exist on `origin` (for example `codex/add-space-audit-subcommand-to-cli.py`), create and push the branch first:
+
+```bash
+git checkout -b codex/add-space-audit-subcommand-to-cli.py
+git push -u origin codex/add-space-audit-subcommand-to-cli.py
+```
+
+After the branch exists on the remote, rerun the setup/fetch step.
