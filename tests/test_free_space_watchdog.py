@@ -52,6 +52,7 @@ def test_spike_creates_evidence_bundle_and_manifest():
             capture_active_process_io=True,
             retention_max_bundles=5,
             retention_max_disk_bytes=10_000_000,
+            capture_process_file_handles=True,
         )
         if result["evidence_bundle_count"] > 0:
             bundle = Path(result["evidence_bundles"][0]["bundle_dir"])
@@ -60,6 +61,7 @@ def test_spike_creates_evidence_bundle_and_manifest():
             assert (bundle / "top_dir_deltas.json").exists()
             assert (bundle / "top_extension_deltas.json").exists()
             assert (bundle / "process_io_snapshot.json").exists()
+            assert (bundle / "process_file_handles.json").exists()
             assert (bundle / "policy_context.json").exists()
 
 
@@ -97,6 +99,9 @@ def test_watchdog_respects_cancellation_and_schema_shape():
         lines = out_csv.read_text(encoding="utf-8").strip().splitlines()
         assert lines == ["timestamp,total_bytes,free_bytes,used_bytes,free_delta_bytes,spike"]
         assert result["mode"] == "watchdog_read_only"
+        assert "remediation" in result
+        assert result["remediation"]["safety"] == "Never force-terminate processes automatically."
+        assert "signals" in result
 
 
 def test_correlated_watchdog_writes_both_streams_and_event_ids():

@@ -693,6 +693,7 @@ def sample_free_space_timeline(
     retention_max_bundles: int | None = None,
     retention_max_disk_bytes: int | None = None,
     top_n_deltas: int = 20,
+    capture_process_file_handles: bool = False,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Periodically capture free-space metrics into CSV.
@@ -723,6 +724,8 @@ def sample_free_space_timeline(
     previous_free: int | None = None
     spikes: list[dict[str, Any]] = []
     evidence_bundles: list[dict[str, Any]] = []
+    non_recovery_events: list[dict[str, Any]] = []
+    probable_deleted_open_events: list[dict[str, Any]] = []
     baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
@@ -746,6 +749,43 @@ def sample_free_space_timeline(
         else:
             payload["error"] = "process io counters unavailable on this platform"
         return payload
+
+    def _scan_deleted_open_handles() -> dict[str, Any]:
+        if not capture_process_file_handles:
+            return {"enabled": False}
+        proc_root = Path("/proc")
+        if not proc_root.exists():
+            return {"enabled": True, "confidence": "none", "error": "process handle scan unavailable on this platform"}
+        findings: list[dict[str, Any]] = []
+        scanned_pids = 0
+        permission_denied = 0
+        for pid_dir in proc_root.iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            fd_dir = pid_dir / "fd"
+            if not fd_dir.exists():
+                continue
+            scanned_pids += 1
+            try:
+                for fd_entry in fd_dir.iterdir():
+                    try:
+                        target = os.readlink(fd_entry)
+                    except OSError:
+                        continue
+                    if target.endswith(" (deleted)"):
+                        findings.append({"pid": int(pid_dir.name), "fd": fd_entry.name, "target": target})
+            except PermissionError:
+                permission_denied += 1
+            except OSError:
+                continue
+        return {
+            "enabled": True,
+            "confidence": "partial" if permission_denied else "high",
+            "scanned_pids": scanned_pids,
+            "permission_denied_pids": permission_denied,
+            "deleted_open_handle_count": len(findings),
+            "deleted_open_file_handles": findings[:1000],
+        }
 
     def _bundle_size_bytes(bundle_dir: Path) -> int:
         total = 0
@@ -838,6 +878,8 @@ def sample_free_space_timeline(
                 write_json_atomic(bundle_dir / "top_dir_deltas.json", {"rows": [{"dir": k, "delta_bytes": int(v)} for k, v in top_dir_deltas]})
                 write_json_atomic(bundle_dir / "top_extension_deltas.json", {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]})
                 write_json_atomic(bundle_dir / "process_io_snapshot.json", _collect_io_snapshot())
+                deleted_handles = _scan_deleted_open_handles()
+                write_json_atomic(bundle_dir / "process_file_handles.json", deleted_handles)
                 write_json_atomic(bundle_dir / "policy_context.json", {
                     "policy_path": str(Path(policy_path).resolve()) if policy_path else str(DEFAULT_TOML),
                     "enforce_safe_delete_roots": bool(protection_cfg.enforce_safe_delete_roots),
@@ -854,6 +896,7 @@ def sample_free_space_timeline(
                         "top_dir_deltas": str(bundle_dir / "top_dir_deltas.json"),
                         "top_extension_deltas": str(bundle_dir / "top_extension_deltas.json"),
                         "process_io_snapshot": str(bundle_dir / "process_io_snapshot.json"),
+                        "process_file_handles": str(bundle_dir / "process_file_handles.json"),
                         "policy_context": str(bundle_dir / "policy_context.json"),
                     },
                 }
@@ -871,6 +914,22 @@ def sample_free_space_timeline(
                         "severity": severity,
                     }
                 )
+                shrink_total = int(diff.get("totals", {}).get("total_shrink_bytes", 0))
+                if shrink_total > 0 and delta <= 0:
+                    non_recovery_events.append({
+                        "timestamp": _utc_now_iso(),
+                        "pattern": "free-space-non-recovery-despite-deletions",
+                        "free_delta_bytes": delta,
+                        "observed_shrink_bytes": shrink_total,
+                        "bundle_dir": str(bundle_dir),
+                    })
+                if deleted_handles.get("enabled") and int(deleted_handles.get("deleted_open_handle_count", 0)) > 0:
+                    probable_deleted_open_events.append({
+                        "timestamp": _utc_now_iso(),
+                        "deleted_open_handle_count": int(deleted_handles.get("deleted_open_handle_count", 0)),
+                        "bundle_dir": str(bundle_dir),
+                        "sample": deleted_handles.get("deleted_open_file_handles", [])[:5],
+                    })
                 event_window = {
                     "event_id": spikes[-1]["event_id"],
                     "window_start": spikes[-1]["timestamp"],
@@ -906,6 +965,18 @@ def sample_free_space_timeline(
         "attribution_reports": attribution_reports,
         "evidence_bundle_count": len(evidence_bundles),
         "evidence_bundles": evidence_bundles,
+        "signals": {
+            "non_recovery_despite_deletions": non_recovery_events,
+            "probable_deleted_but_open": probable_deleted_open_events,
+        },
+        "remediation": {
+            "safety": "Never force-terminate processes automatically.",
+            "recommended_steps": [
+                "Close the application or service that likely owns the open handle.",
+                "Restart the specific process/service to release stale file descriptors.",
+                "Reboot the system as a last resort if free space still does not recover.",
+            ],
+        },
     }
 
 
