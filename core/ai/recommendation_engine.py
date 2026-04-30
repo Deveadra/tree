@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.ai.action_catalog import build_action_step, order_steps
+from core.ai.prompt_security import build_strict_prompt_template, validate_allowlisted_schema
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,13 @@ def build_recommendations(
     """
 
     candidates = _extract_candidates(evidence)
+    user_notes = ""
+    try:
+        notes_features = evidence.get("user_notes_context", [])
+        if isinstance(notes_features, list) and notes_features:
+            user_notes = str(notes_features[0].get("notes") or notes_features[0].get("context", {}).get("notes", ""))
+    except Exception:
+        user_notes = ""
     recommendations: list[dict[str, Any]] = []
 
     for idx, candidate in enumerate(candidates):
@@ -141,6 +149,10 @@ def build_recommendations(
         }
 
         try:
+            rec["strict_prompt_template"] = build_strict_prompt_template(
+                evidence={"candidate": candidate, "metrics": metrics},
+                user_notes=user_notes,
+            )
             rec["rationale"] = rationale_generator(rec) if rationale_generator else _default_summary(rec)
             rec["rationale_mode"] = "llm" if rationale_generator else "deterministic"
         except Exception:
@@ -161,7 +173,7 @@ def build_recommendations(
 
     top = ordered[: max(1, config.top_n)]
 
-    return {
+    response = {
         "recommendations": top,
         "rankings": {
             "root_cause": [r["id"] for r in sorted(ordered, key=lambda x: (-x["root_cause_score"], str(x["id"])))],
@@ -171,3 +183,5 @@ def build_recommendations(
         },
         "deterministic": True,
     }
+    validate_allowlisted_schema(response, allowlisted_keys={"recommendations", "rankings", "deterministic"})
+    return response
