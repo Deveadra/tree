@@ -19,7 +19,6 @@ def find_duplicates(
         db_path=db_path,
         cancel_flag=cancel_flag,
         metrics_cb=metrics_cb,
-        compare_mode=compare_mode,
         error_log_path=error_log_path,
         required_roots=required_roots,
     )
