@@ -139,6 +139,37 @@ class ScanWorker(QObject):
     def _cancel_flag(self) -> bool:
         return self._cancel
 
+    def _persist_run_state(self, db_path: Path, state: str, reason: Optional[str] = None) -> None:
+        try:
+            con = sqlite3.connect(str(db_path))
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS run_state (
+                        run_id TEXT PRIMARY KEY,
+                        state TEXT NOT NULL,
+                        reason TEXT,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                con.execute(
+                    """
+                    INSERT INTO run_state(run_id,state,reason,updated_at)
+                    VALUES(?,?,?,?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                      state=excluded.state,
+                      reason=excluded.reason,
+                      updated_at=excluded.updated_at
+                    """,
+                    (self.run_id, state, reason, time.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+                con.commit()
+            finally:
+                con.close()
+        except Exception:
+            pass
+
     @Slot()
     def run(self) -> None:
         try:
@@ -168,11 +199,13 @@ class ScanWorker(QObject):
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "created")
             meta["status"] = "scanning"
             try:
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "scanning")
 
             def push(m: dict) -> None:
                 self.metrics.emit(m)
@@ -237,18 +270,21 @@ class ScanWorker(QObject):
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "indexed")
 
             if self._cancel_flag():
                 meta["status"] = "cancelled"
                 meta["cancel_reason"] = self._cancel_reason or "cancelled_during_scan"
                 write_json_atomic(meta_path, meta)
                 write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "cancelled", meta["cancel_reason"])
                 self.status.emit("Cancelled during scan.")
                 self.finished.emit([])
                 return
 
             meta["status"] = "planned"
             write_json_atomic(meta_path, meta)
+            self._persist_run_state(db_path, "planned")
             self.status.emit("Finding duplicates (size + SHA-256)...")
 
             try:
@@ -297,12 +333,14 @@ class ScanWorker(QObject):
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "applying")
 
             if self._cancel_flag():
                 meta["status"] = "cancelled"
                 meta["cancel_reason"] = self._cancel_reason or "cancelled_during_hash"
                 write_json_atomic(meta_path, meta)
                 write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "cancelled", meta["cancel_reason"])
                 self.status.emit("Cancelled during hashing.")
                 self.finished.emit([])
                 return
@@ -323,6 +361,7 @@ class ScanWorker(QObject):
                 write_run_summary(self.report_dir, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "completed")
 
             elapsed = time.time() - t0
             self.status.emit(
@@ -337,6 +376,7 @@ class ScanWorker(QObject):
                 meta["error"] = str(e)
                 write_json_atomic(meta_path, meta)
                 write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "failed", str(e))
             except Exception:
                 pass
             self.error.emit(str(e))

@@ -352,6 +352,16 @@ def _db_create_schema(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX idx_files_size ON files(size);")
     con.execute("CREATE INDEX idx_files_name ON files(name);")
     con.execute("CREATE INDEX idx_files_root ON files(root_id);")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_state (
+            run_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
 
 
 def _scan_root_append_to_con(
@@ -543,7 +553,16 @@ def scan_roots_to_db(
     """
     exclude_names, exclude_prefixes = compile_excludes(excludes)
 
-    if db_path.exists():
+    resume_root_id = -1
+    if checkpoint_path and checkpoint_path.exists():
+        try:
+            ck = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            resume_root_id = int(ck.get("last_scanned_root_id", -1))
+        except Exception:
+            resume_root_id = -1
+
+    recreate = (not db_path.exists()) or resume_root_id < 0
+    if recreate and db_path.exists():
         db_path.unlink()
 
     con = sqlite3.connect(str(db_path))
@@ -554,6 +573,8 @@ def scan_roots_to_db(
         combined = {"listed": 0, "indexed": 0, "skipped": 0, "errors": 0}
 
         for rid, r in enumerate(roots):
+            if resume_root_id >= 0 and rid <= resume_root_id:
+                continue
             if cancel_flag():
                 break
 
@@ -713,12 +734,24 @@ def find_dupes_from_db(
         emit(force=True)
 
         last_done_size = None
+        resumed_dupes: list[DupeGroup] = []
         if checkpoint_path and checkpoint_path.exists():
             try:
                 ck = json.loads(checkpoint_path.read_text(encoding="utf-8"))
                 last_done_size = ck.get("last_done_size")
+                for g in ck.get("dupes_so_far", []):
+                    resumed_dupes.append(
+                        DupeGroup(
+                            sha256=str(g["sha256"]),
+                            size=int(g["size"]),
+                            files=[FileRec(**f) for f in g.get("files", [])],
+                        )
+                    )
             except Exception:
                 last_done_size = None
+                resumed_dupes = []
+        if resumed_dupes:
+            dupes.extend(resumed_dupes)
 
         for i, size in enumerate(sizes, start=1):
             if last_done_size is not None and int(size) <= int(last_done_size):
@@ -805,7 +838,18 @@ def find_dupes_from_db(
                 try:
                     write_json_atomic(
                         checkpoint_path,
-                        {"last_done_size": int(size), "done_groups": int(done_groups)},
+                        {
+                            "last_done_size": int(size),
+                            "done_groups": int(done_groups),
+                            "dupes_so_far": [
+                                {
+                                    "sha256": d.sha256,
+                                    "size": d.size,
+                                    "files": [f.__dict__ for f in d.files],
+                                }
+                                for d in dupes
+                            ],
+                        },
                     )
                 except Exception:
                     pass
