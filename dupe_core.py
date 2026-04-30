@@ -41,6 +41,24 @@ class DupeGroup:
     files: list[FileRec]
 
 
+@dataclass(frozen=True)
+class PruneCandidate:
+    path: str
+    size: int
+    mtime: float
+    reason_codes: list[str]
+    risk_flags: list[str]
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    path: str
+    action: str
+    status: str
+    detail: str
+    ts_utc: str
+
+
 # Normalized (case-insensitive on Windows) path prefixes loaded from config/excludes.toml
 DEFAULT_EXCLUDES: list[str] = load_exclude_prefixes()
 
@@ -235,6 +253,132 @@ def fmt_time(epoch: float) -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
     except Exception:
         return str(epoch)
+
+
+def utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _normalized_plan_payload(plan: dict[str, Any]) -> bytes:
+    # Signature always excludes itself.
+    to_sign = dict(plan)
+    to_sign.pop("plan_signature", None)
+    return json.dumps(to_sign, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def compute_plan_signature(plan: dict[str, Any]) -> str:
+    return hashlib.sha256(_normalized_plan_payload(plan)).hexdigest()
+
+
+def validate_plan_signature(plan: dict[str, Any]) -> bool:
+    sig = str(plan.get("plan_signature", ""))
+    return bool(sig) and sig == compute_plan_signature(plan)
+
+
+def write_prune_plan(
+    artifact_path: Path,
+    *,
+    roots: list[str],
+    excludes: list[str],
+    compare_mode: bool,
+    candidates: list[PruneCandidate],
+    dry_run: bool,
+    plan_id: Optional[str] = None,
+) -> dict[str, Any]:
+    if not plan_id:
+        plan_id = hashlib.sha256(f"{utc_now_iso()}|{'|'.join(sorted(roots))}".encode("utf-8")).hexdigest()[:12]
+
+    plan: dict[str, Any] = {
+        "plan_id": plan_id,
+        "metadata": {
+            "roots": roots,
+            "excludes": excludes,
+            "compare_mode": compare_mode,
+            "generated_at_utc": utc_now_iso(),
+            "dry_run": dry_run,
+        },
+        "candidates": [
+            {
+                "path": c.path,
+                "size": int(c.size),
+                "mtime": float(c.mtime),
+                "reason_codes": c.reason_codes,
+                "risk_flags": c.risk_flags,
+            }
+            for c in candidates
+        ],
+        "aggregate": {
+            "candidate_count": len(candidates),
+            "bytes_to_reclaim": sum(int(c.size) for c in candidates),
+        },
+    }
+    plan["plan_signature"] = compute_plan_signature(plan)
+    artifact_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    return plan
+
+
+def _is_writable_dir(path: Path) -> bool:
+    try:
+        safe_mkdir(path)
+        probe = path / f".write_test_{time.time_ns()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def apply_prune_plan(
+    plan: dict[str, Any],
+    *,
+    confirmation_token: Optional[str],
+    require_confirmation: bool,
+    dry_run: bool,
+    destination_dir: Optional[Path],
+    events_path: Path,
+    apply_fn: Callable[[str], None],
+) -> list[ApplyResult]:
+    if not validate_plan_signature(plan):
+        raise ValueError("Invalid plan signature; refusing apply.")
+
+    expected = f"APPLY PLAN {plan.get('plan_id', '')}"
+    if require_confirmation and confirmation_token != expected:
+        raise ValueError(f"Confirmation token required: '{expected}'")
+
+    if destination_dir is not None and not _is_writable_dir(destination_dir):
+        raise RuntimeError(f"Destination is not writable: {destination_dir}")
+
+    results: list[ApplyResult] = []
+    for c in plan.get("candidates", []):
+        p = Path(str(c.get("path", "")))
+        rec_size = int(c.get("size", -1))
+        rec_mtime = float(c.get("mtime", -1.0))
+        ts = utc_now_iso()
+
+        if not p.exists():
+            results.append(ApplyResult(str(p), "skip", "preflight_failed", "missing", ts))
+            continue
+
+        st = p.stat()
+        if st.st_size != rec_size or float(st.st_mtime) != rec_mtime:
+            results.append(ApplyResult(str(p), "skip", "preflight_failed", "changed_since_scan", ts))
+            continue
+
+        if dry_run:
+            results.append(ApplyResult(str(p), "dry_run", "ok", "no filesystem changes", ts))
+            continue
+
+        try:
+            apply_fn(str(p))
+            results.append(ApplyResult(str(p), "apply", "ok", "deleted_or_moved", ts))
+        except Exception as e:
+            results.append(ApplyResult(str(p), "apply", "error", f"{type(e).__name__}: {e}", ts))
+
+    with events_path.open("a", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r.__dict__, sort_keys=True) + "\n")
+
+    return results
 
 
 # ----------------------------
