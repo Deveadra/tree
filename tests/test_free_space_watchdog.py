@@ -120,3 +120,45 @@ def test_correlated_watchdog_writes_both_streams_and_event_ids():
         assert fast_lines[0].startswith("event_id,stream,timestamp,total_bytes")
         assert growth_lines[0].startswith("event_id,stream,timestamp,tree_bytes_delta")
         assert result["mode"] == "watchdog_correlated_read_only"
+
+
+def test_correlated_watchdog_heartbeat_state_and_recovery():
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        fast_csv = root / "free_space_timeline_fast.csv"
+        growth_csv = root / "space_growth_timeline.csv"
+        heartbeat = root / "heartbeat.json"
+        state = root / "collector_state.json"
+        sample_correlated_space_timeline(
+            root=root,
+            output_fast_csv=fast_csv,
+            output_growth_csv=growth_csv,
+            fast_interval_seconds=0.0,
+            growth_interval_seconds=0.0,
+            max_fast_rows=1,
+            max_growth_rows=1,
+            heartbeat_path=heartbeat,
+            restart_state_path=state,
+            heartbeat_interval_seconds=0.0,
+            rotate_bytes=256,
+        )
+        assert heartbeat.exists()
+        assert state.exists()
+        first_state = state.read_text(encoding="utf-8")
+        resumed = sample_correlated_space_timeline(
+            root=root,
+            output_fast_csv=fast_csv,
+            output_growth_csv=growth_csv,
+            fast_interval_seconds=0.0,
+            growth_interval_seconds=0.0,
+            max_fast_rows=2,
+            max_growth_rows=2,
+            heartbeat_path=heartbeat,
+            restart_state_path=state,
+            heartbeat_interval_seconds=0.0,
+            rotate_bytes=256,
+        )
+        assert resumed["degradation"]["api_failures"] >= 0
+        assert resumed["degradation"]["missed_ticks"] >= 0
+        assert resumed["degradation"]["sampling_lag_events"] >= 0
+        assert state.read_text(encoding="utf-8") != first_state
