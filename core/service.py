@@ -21,6 +21,9 @@ def find_duplicates(
     error_log_path: Optional[Path] = None,
     required_roots: Optional[tuple[int, int]] = None,
 ) -> list[DuplicateResultGroup]:
+    # compare_mode is kept for backward-compatible facade calls, but
+    # duplicate filtering is handled via required_roots.
+    _ = compare_mode
     return _find_duplicates(
         db_path=db_path,
         cancel_flag=cancel_flag,
