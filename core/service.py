@@ -81,12 +81,6 @@ def scan_to_db(
     scan_error_log_path: Path | None = None,
     checkpoint_path: Path | None = None,
 ) -> dict[str, Any]:
-    def _never_cancel() -> bool:
-        return False
-
-    def _ignore_metrics(_: dict) -> None:
-        return None
-
     if compare_mode and len(roots) >= 2:
         return scan_roots_to_db(
             db_path=db_path,
@@ -335,12 +329,6 @@ def apply_prune(
                     ),
                 )
             continue
-        try:
-            windows_recycle([str(p)])
-            results["applied"] += 1
-            if audit_log:
-                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "ok"})
-        except Exception:
 
         if action_mode in {"recycle", "delete", "move"}:
             perm = evaluate_delete_permission(
@@ -376,8 +364,8 @@ def apply_prune(
                     )
                 continue
 
-        ok = windows_recycle(p)
-        if ok:
+        try:
+            windows_recycle([str(p)])
             results["applied"] += 1
             if audit_log:
                 append_prune_event(
@@ -389,7 +377,7 @@ def apply_prune(
                         matched_rule="allow_default",
                     ),
                 )
-        else:
+        except Exception:
             results["errors"] += 1
             if audit_log:
                 append_prune_event(
