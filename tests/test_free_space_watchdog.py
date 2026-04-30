@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 
 from core.space_audit import sample_free_space_timeline
 
@@ -37,3 +38,22 @@ def test_spike_detection_records_events():
         assert "spikes" in result
         assert result["spike_count"] >= 0
 
+
+def test_watchdog_respects_cancellation_and_schema_shape():
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_csv = root / "free_space_timeline.csv"
+        cancel = Event()
+        cancel.set()
+        result = sample_free_space_timeline(
+            root=root,
+            output_csv=out_csv,
+            interval_seconds=0.0,
+            max_rows=10,
+            cancel_flag=cancel,
+        )
+        assert result["cancelled"] is True
+        assert result["rows_written"] == 0
+        lines = out_csv.read_text(encoding="utf-8").strip().splitlines()
+        assert lines == ["timestamp,total_bytes,free_bytes,used_bytes,free_delta_bytes,spike"]
+        assert result["mode"] == "watchdog_read_only"
