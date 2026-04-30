@@ -158,3 +158,75 @@ Validation warnings:
 - malformed drive prefixes (example: `C:bad`) produce warnings.
 - unresolved `%ENV_VAR%` segments in path entries produce warnings.
 - enabling `enforce_safe_delete_roots` without any configured `safe_delete_roots` produces a warning.
+
+
+## Space Audit: purpose, commands, and GUI steps
+
+Purpose:
+
+- Explain where disk usage is concentrated after duplicate cleanup.
+- Quantify what bytes are attributable to scanned roots vs. outside-of-scan activity.
+- Track free-space and allocation deltas between snapshots so cleanup outcomes are verifiable.
+
+CLI commands:
+
+```bash
+# Capture a baseline snapshot before cleanup
+python cli.py scan --root <ROOT> --json > reports/scan_before.json
+python cli.py report --scan reports/scan_before.json --json > reports/report_before.json
+
+# Generate duplicate groups and prune plan
+python cli.py dupes --scan reports/scan_before.json --json > reports/dupes_before.json
+python cli.py plan-prune --dupes reports/dupes_before.json --json > reports/prune_plan.json
+
+# Apply prune safely (dry-run by default; remove --dry-run only when ready)
+python cli.py apply-prune --plan reports/prune_plan.json --dry-run --json > reports/apply_dry_run.json
+
+# Re-scan and compare after cleanup
+python cli.py scan --root <ROOT> --json > reports/scan_after.json
+python cli.py report --scan reports/scan_after.json --json > reports/report_after.json
+```
+
+GUI steps:
+
+1. Open the app and run **Scan** on your target root(s).
+2. Open **Duplicates** and review grouped candidates.
+3. Run **Plan Prune** and inspect keep/delete actions.
+4. Run **Apply Prune** in dry-run mode first; confirm no protected/system paths are included.
+5. Re-run **Scan** and open **Report** to validate reclaimed space and snapshot deltas.
+
+## Interpretation guide
+
+### How to read unattributed bytes
+
+- Treat *unattributed bytes* as storage change that is not explained by files under your scanned roots.
+- Common causes include: system restore points, package manager caches, temp files outside the scan root, metadata/journal growth, and other process activity during the audit window.
+- Use the same root scope and close high-churn apps when capturing before/after snapshots to reduce unattributed drift.
+
+### Why free space may not rebound immediately
+
+- Files moved to recycle/trash do not free disk blocks until the recycle area is emptied.
+- Some filesystems and OS services release blocks asynchronously, so `free` metrics can lag deletion.
+- Open file handles can delay reclamation until the owning process closes the handle.
+
+### How to compare snapshots safely
+
+- Compare snapshots only when scope is identical (same roots, same exclude rules, same protection policy).
+- Minimize background churn (updates, backups, sync clients) between snapshots.
+- Prefer a short baseline→cleanup→rescan interval and archive both JSON artifacts for auditability.
+
+## Warning guidance for protected/system-managed paths
+
+- Never force-delete files from system-managed locations (for example OS directories, package stores, security tooling folders, or recovery partitions).
+- Keep protection policy enabled and verify protected-prefix/dir-name matches before destructive actions.
+- If a duplicate candidate is under a protected path, treat it as non-actionable unless policy and ownership are explicitly reviewed.
+
+## Recommended workflow: duplicate cleanup + space audit validation
+
+1. Capture a **baseline scan/report** snapshot.
+2. Generate duplicate groups and review candidates.
+3. Create a prune plan and run **dry-run apply**.
+4. Resolve any protected-path warnings or policy conflicts.
+5. Execute confirmed prune with explicit safety flags.
+6. Capture **post-cleanup scan/report** snapshot.
+7. Compare before/after totals, free-space change, and unattributed bytes; if unattributed growth is high, repeat during a lower-churn window.
