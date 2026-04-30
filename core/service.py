@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 from core.actions import build_prune_plan, execute_prune_plan
 from core.hash_index import find_duplicates as hash_find_duplicates
 from core.models import DuplicateResultGroup, ScanRequest
+from core.protection_policy import evaluate_delete_permission
 from dupe_core import (
     DupeGroup,
     analyze_path_prefixes,
@@ -161,18 +162,59 @@ def plan_prune(groups: list[DupeGroup], source_id: str = "unknown") -> dict[str,
     return plan
 
 
-def apply_prune(plan: dict[str, Any], dry_run: bool = True, yes: bool = False, audit_log: Path | None = None) -> dict[str, Any]:
+def apply_prune(
+    plan: dict[str, Any],
+    dry_run: bool = True,
+    yes: bool = False,
+    audit_log: Path | None = None,
+    enforce_safe_delete_roots: bool = False,
+    safe_delete_roots: list[Path] | None = None,
+) -> dict[str, Any]:
     _validate_plan_structure(plan)
     _verify_plan_checksum(plan)
 
     if not dry_run and not yes:
         raise ValueError("Refusing destructive action without --yes")
 
-    results = {"applied": 0, "skipped": 0, "errors": 0, "dry_run": dry_run}
+    results = {
+        "applied": 0,
+        "skipped": 0,
+        "errors": 0,
+        "blocked": 0,
+        "blocked_reasons": {},
+        "dry_run": dry_run,
+    }
     for a in plan.get("actions", []):
         p = Path(a["path"])
         snapshot = a.get("snapshot", {})
         reason = None
+
+        if enforce_safe_delete_roots:
+            perm = evaluate_delete_permission(
+                str(p),
+                mode=str(a.get("action", "delete")),
+                action_type="delete",
+                safe_roots=safe_delete_roots,
+            )
+            if not bool(perm.get("allow")):
+                reason_code = str(perm.get("reason_code", "policy_deny"))
+                reason = str(perm.get("reason", "Blocked by protection policy"))
+                results["skipped"] += 1
+                results["blocked"] += 1
+                blocked_reasons = results["blocked_reasons"]
+                blocked_reasons[reason_code] = int(blocked_reasons.get(reason_code, 0)) + 1
+                if audit_log:
+                    append_prune_event(
+                        audit_log,
+                        {
+                            "action": a.get("action"),
+                            "path": str(p),
+                            "status": "skip",
+                            "reason_code": reason_code,
+                            "reason": reason,
+                        },
+                    )
+                continue
 
         if not p.exists():
             reason = "file_missing"
