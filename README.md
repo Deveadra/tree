@@ -73,3 +73,11 @@ Rules support both:
 ## Rule-hit tracing
 
 Scan internals can collect a `rule_trace` list from `_scan_root_append_to_con(...)` to explain why directories/items were skipped.
+
+## Testing
+
+Canonical import strategy: **flat-module imports with explicit test-runner PYTHONPATH config**. `pytest.ini` sets `pythonpath = .`, so imports like `config.path_rules` resolve from repo root without manual environment variables.
+
+- Local test command: `pytest -q`
+- CI test command: `pytest -q`
+- Import smoke check: `python -c "import config.path_rules; print('ok')"`
