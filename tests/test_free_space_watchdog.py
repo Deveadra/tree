@@ -65,6 +65,7 @@ def test_spike_creates_evidence_bundle_and_manifest():
             assert (bundle / "process_io_snapshot.json").exists()
             assert (bundle / "process_file_handles.json").exists()
             assert (bundle / "policy_context.json").exists()
+            assert (bundle / "ai_evidence.json").exists()
 
 
 def test_bundle_retention_max_bundles_prunes_oldest():
