@@ -54,3 +54,7 @@ def test_recommendation_artifacts_and_fallback_mode():
     assert "thresholds" in rec
     assert rec["rationale_mode"] == "fallback_non_llm"
     assert isinstance(rec["rationale"], str) and rec["rationale"]
+    assert isinstance(rec["action_steps"], list)
+    assert rec["action_steps"][0]["expected_space_recovery_range_gb"]["min"] >= 0
+    assert "verification_checkpoint" in rec["action_steps"][0]
+    assert "rollback_path" in rec["action_steps"][0]

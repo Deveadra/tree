@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from core.ai.action_catalog import build_action_step, order_steps
+
 
 @dataclass(frozen=True)
 class RecommendationConfig:
@@ -115,6 +117,8 @@ def build_recommendations(
         risk_score = _clamp01(root_cause_score * 0.7 + (1.0 - reclaim_score) * 0.3)
         tier = _risk_tier(risk_score, config.risk_thresholds)
 
+        action_step = build_action_step(str(candidate.get("id", "")))
+
         rec = {
             "id": candidate.get("id", f"candidate-{idx}"),
             "title": candidate.get("title", "Recommendation"),
@@ -132,6 +136,8 @@ def build_recommendations(
                 "risk_blend": {"root_cause": 0.7, "inverse_reclaim": 0.3},
             },
             "thresholds": {"risk_tier": dict(config.risk_thresholds)},
+            "action_steps": order_steps([action_step]) if action_step else [],
+            "contains_irreversible_steps": bool(action_step and action_step.get("reversibility") == "irreversible"),
         }
 
         try:
