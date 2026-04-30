@@ -70,6 +70,7 @@ from dupe_core import (
     fmt_duration,
     fmt_time,
     format_bytes,
+    new_run_id,
 )
 from core.models import ScanRequest
 from core.service import (
@@ -85,6 +86,7 @@ from core.reports import (
     write_live_reports,
     write_scan_reports,
     write_path_suggestions,
+    write_run_summary,
     write_versioned_meta,
 )
 
@@ -133,12 +135,46 @@ class ScanWorker(QObject):
         self.follow_symlinks = follow_symlinks
         self.min_size = min_size
         self._cancel = False
+        self._cancel_reason = ""
+        self.run_id = self.report_dir.name
 
-    def cancel(self) -> None:
+    def cancel(self, reason: str = "user_requested") -> None:
         self._cancel = True
+        self._cancel_reason = reason
 
     def _cancel_flag(self) -> bool:
         return self._cancel
+
+    def _persist_run_state(self, db_path: Path, state: str, reason: Optional[str] = None) -> None:
+        try:
+            con = sqlite3.connect(str(db_path))
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS run_state (
+                        run_id TEXT PRIMARY KEY,
+                        state TEXT NOT NULL,
+                        reason TEXT,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                con.execute(
+                    """
+                    INSERT INTO run_state(run_id,state,reason,updated_at)
+                    VALUES(?,?,?,?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                      state=excluded.state,
+                      reason=excluded.reason,
+                      updated_at=excluded.updated_at
+                    """,
+                    (self.run_id, state, reason, time.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+                con.commit()
+            finally:
+                con.close()
+        except Exception:
+            pass
 
     @Slot()
     def run(self) -> None:
@@ -149,6 +185,7 @@ class ScanWorker(QObject):
 
             meta_path = self.report_dir / "run_meta.json"
             meta: dict = {
+                "run_id": self.run_id,
                 "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "roots": [str(r) for r in self.roots],
                 "compare_mode": bool(self.compare_mode),
@@ -161,12 +198,20 @@ class ScanWorker(QObject):
                 "dupe_groups": None,
                 "finished_at": None,
                 "elapsed_s": None,
-                "status": "started",
+                "status": "created",
+                "cancel_reason": None,
             }
             try:
                 write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "created")
+            meta["status"] = "scanning"
+            try:
+                write_json_atomic(meta_path, meta)
+            except Exception:
+                pass
+            self._persist_run_state(db_path, "scanning")
 
             def push(m: dict) -> None:
                 self.metrics.emit(m)
@@ -180,18 +225,16 @@ class ScanWorker(QObject):
             self.progress.emit(0, 0)
 
             if self.compare_mode and len(self.roots) >= 2:
-                scan_stats_full = scan(
-                    ScanRequest(
-                        db_path=db_path,
-                        roots=self.roots,
-                        excludes=self.excludes,
-                        follow_symlinks=self.follow_symlinks,
-                        min_size=self.min_size,
-                        cancel_flag=self._cancel_flag,
-                        metrics_cb=push,
-                        scan_error_log_path=self.report_dir / "scan_errors.txt",
-                    )
-                )
+                scan_stats_full = scan_roots_to_db(
+                    db_path=db_path,
+                    roots=self.roots,
+                    excludes=self.excludes,
+                    follow_symlinks=self.follow_symlinks,
+                    min_size=self.min_size,
+                    cancel_flag=self._cancel_flag,
+                    metrics_cb=push,
+                    scan_error_log_path=self.report_dir / "scan_errors.txt",
+                    checkpoint_path=self.report_dir / "checkpoint_scan.json",
                 scan_stats = scan_stats_full.get("combined") or {
                     "listed": 0,
                     "indexed": 0,
@@ -200,17 +243,16 @@ class ScanWorker(QObject):
                 }
                 meta["scan_stats_full"] = scan_stats_full
             else:
-                scan_stats = scan(
-                    ScanRequest(
-                        db_path=db_path,
-                        roots=[self.roots[0]],
-                        excludes=self.excludes,
-                        follow_symlinks=self.follow_symlinks,
-                        min_size=self.min_size,
-                        cancel_flag=self._cancel_flag,
-                        metrics_cb=push,
-                        scan_error_log_path=self.report_dir / "scan_errors.txt",
-                    )
+                scan_stats = scan_root_to_db(
+                    db_path=db_path,
+                    root=self.roots[0],
+                    excludes=self.excludes,
+                    follow_symlinks=self.follow_symlinks,
+                    min_size=self.min_size,
+                    cancel_flag=self._cancel_flag,
+                    metrics_cb=push,
+                    scan_error_log_path=self.report_dir / "scan_errors.txt",
+                    checkpoint_path=self.report_dir / "checkpoint_scan.json",
                 )
 
             # Count how many size-groups will be hashed
@@ -228,17 +270,26 @@ class ScanWorker(QObject):
 
             meta["scan_stats"] = scan_stats
             meta["size_groups_total"] = size_groups_total
-            meta["status"] = "scanned"
+            meta["status"] = "indexed"
             try:
                 write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "indexed")
 
             if self._cancel_flag():
+                meta["status"] = "cancelled"
+                meta["cancel_reason"] = self._cancel_reason or "cancelled_during_scan"
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "cancelled", meta["cancel_reason"])
                 self.status.emit("Cancelled during scan.")
                 self.finished.emit([])
                 return
 
+            meta["status"] = "planned"
+            write_json_atomic(meta_path, meta)
+            self._persist_run_state(db_path, "planned")
             self.status.emit("Finding duplicates (size + SHA-256)...")
 
             try:
@@ -278,16 +329,23 @@ class ScanWorker(QObject):
                 required_roots=(
                     (0, 1) if (self.compare_mode and len(self.roots) >= 2) else None
                 ),
+                checkpoint_path=self.report_dir / "checkpoint_hash.json",
             )
 
             meta["dupe_groups"] = len(dupes)
-            meta["status"] = "hashed"
+            meta["status"] = "applying"
             try:
                 write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "applying")
 
             if self._cancel_flag():
+                meta["status"] = "cancelled"
+                meta["cancel_reason"] = self._cancel_reason or "cancelled_during_hash"
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "cancelled", meta["cancel_reason"])
                 self.status.emit("Cancelled during hashing.")
                 self.finished.emit([])
                 return
@@ -302,11 +360,13 @@ class ScanWorker(QObject):
 
             meta["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             meta["elapsed_s"] = float(time.time() - t0)
-            meta["status"] = "done"
+            meta["status"] = "completed"
             try:
-                write_versioned_meta(meta_path, meta)
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "completed")
 
             elapsed = time.time() - t0
             self.status.emit(
@@ -316,6 +376,14 @@ class ScanWorker(QObject):
             self.finished.emit(dupes)
 
         except Exception as e:
+            try:
+                meta["status"] = "failed"
+                meta["error"] = str(e)
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "failed", str(e))
+            except Exception:
+                pass
             self.error.emit(str(e))
 
 
@@ -881,10 +949,11 @@ class MainWindow(QMainWindow):
             return tag[:40] if tag else "scan"
 
         stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        run_id = new_run_id()[:12]
         tag = scan_root.name or scan_root.drive or "scan"
         tag = safe_tag(tag)
 
-        base = f"{stamp}_{tag}"
+        base = f"{stamp}_{tag}_{run_id}"
         run_dir = reports_root / base
 
         n = 1
@@ -1183,7 +1252,7 @@ class MainWindow(QMainWindow):
 
     def cancel_scan(self) -> None:
         if self.worker:
-            self.worker.cancel()
+            self.worker.cancel("user_cancelled")
             self.set_status("Cancel requested…")
 
     @Slot(int, int)
