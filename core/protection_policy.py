@@ -64,14 +64,6 @@ def evaluate_delete_permission(path: str, mode: str, action_type: str, safe_root
     if effective_roots is None and policy is not None:
         effective_roots = [Path(r) for r in policy.safe_delete_roots]
 
-    if policy is not None and not policy.enforce_safe_delete_roots:
-        safe_roots_ok = True
-    else:
-        safe_roots_ok = is_within_safe_delete_roots(path, safe_roots=effective_roots)
-
-    if not safe_roots_ok:
-        return {"allow": False, "reason_code": "outside_safe_roots", "reason": "Path is outside selected scan roots."}
-
     pref = is_under_protected_prefix(path, protected_prefixes=(policy.protected_prefixes if policy else None))
     if pref:
         return {"allow": False, "reason_code": "protected_prefix", "reason": f"Path is under protected prefix: {pref}"}
@@ -79,6 +71,14 @@ def evaluate_delete_permission(path: str, mode: str, action_type: str, safe_root
     dname = contains_protected_dir_name(path, protected_dir_names=(policy.protected_dir_names if policy else None))
     if dname:
         return {"allow": False, "reason_code": "protected_dir_name", "reason": f"Path contains protected directory name: {dname}"}
+
+    if policy is not None and not policy.enforce_safe_delete_roots:
+        safe_roots_ok = True
+    else:
+        safe_roots_ok = is_within_safe_delete_roots(path, safe_roots=effective_roots)
+
+    if not safe_roots_ok:
+        return {"allow": False, "reason_code": "outside_safe_roots", "reason": "Path is outside selected scan roots."}
 
     if action_type == "delete" and "quarantine" in (mode or "").lower() and not effective_roots:
         return {"allow": False, "reason_code": "unsafe_quarantine_config", "reason": "Quarantine requires configured safe roots."}
