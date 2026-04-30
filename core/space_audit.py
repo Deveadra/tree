@@ -46,7 +46,21 @@ def _redact_path_string(value: str, hash_usernames: bool, hash_filenames: bool) 
     return "/".join(redacted)
 
 
-def _apply_redaction_payload(payload: Any, *, hash_usernames: bool, hash_filenames: bool, hash_process_arguments: bool) -> Any:
+def _is_path_key(key: str) -> bool:
+    normalized = key.lower()
+    if normalized in {"path", "target", "dir", "file", "filename", "safe_delete_roots", "protected_prefixes"}:
+        return True
+    return normalized.endswith("_path") or normalized.endswith("_paths")
+
+
+def _apply_redaction_payload(
+    payload: Any,
+    *,
+    hash_usernames: bool,
+    hash_filenames: bool,
+    hash_process_arguments: bool,
+    parent_key: str | None = None,
+) -> Any:
     if isinstance(payload, dict):
         out: dict[str, Any] = {}
         for k, v in payload.items():
@@ -54,15 +68,36 @@ def _apply_redaction_payload(payload: Any, *, hash_usernames: bool, hash_filenam
             if isinstance(v, str):
                 if hash_process_arguments and key in {"cmdline", "args", "command", "command_line"}:
                     out[k] = f"args:{_sha_token(v)}"
-                elif key in {"path", "target", "dir", "file", "filename"}:
+                elif _is_path_key(key):
                     out[k] = _redact_path_string(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames)
                 else:
                     out[k] = v
             else:
-                out[k] = _apply_redaction_payload(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments)
+                out[k] = _apply_redaction_payload(
+                    v,
+                    hash_usernames=hash_usernames,
+                    hash_filenames=hash_filenames,
+                    hash_process_arguments=hash_process_arguments,
+                    parent_key=key,
+                )
         return out
     if isinstance(payload, list):
-        return [_apply_redaction_payload(item, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments) for item in payload]
+        out_list: list[Any] = []
+        path_like_list = bool(parent_key and _is_path_key(parent_key))
+        for item in payload:
+            if isinstance(item, str) and path_like_list:
+                out_list.append(_redact_path_string(item, hash_usernames=hash_usernames, hash_filenames=hash_filenames))
+            else:
+                out_list.append(
+                    _apply_redaction_payload(
+                        item,
+                        hash_usernames=hash_usernames,
+                        hash_filenames=hash_filenames,
+                        hash_process_arguments=hash_process_arguments,
+                        parent_key=parent_key,
+                    )
+                )
+        return out_list
     return payload
 
 
