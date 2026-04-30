@@ -5,6 +5,14 @@ import json
 from pathlib import Path
 
 from core import service
+from core.space_audit import (
+    diff_space_snapshots,
+    resolve_previous_snapshot,
+    scan_space_usage,
+    summarize_by_extension,
+    summarize_top_dirs,
+    write_space_reports,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -56,6 +64,17 @@ def _parser() -> argparse.ArgumentParser:
     w.add_argument("--max-rows", type=int, default=None)
     w.add_argument("--spike-threshold-bytes", type=int, default=None)
     w.add_argument("--json", action="store_true", dest="as_json")
+
+    sa = sub.add_parser("space-audit", help="Run read-only disk usage audit and write reports")
+    sa.add_argument("root", type=Path, help="Root path to audit")
+    sa.add_argument("--report-dir", default="reports")
+    sa.add_argument("--depth", type=int, default=4)
+    sa.add_argument("--top-n", type=int, default=50)
+    sa.add_argument("--compare-to", type=Path, default=None, help="Optional previous snapshot JSON path")
+    sa.add_argument("--watchdog-interval", type=float, default=None)
+    sa.add_argument("--watchdog-duration", type=float, default=None)
+    sa.add_argument("--exclude", action="append", default=[])
+    sa.add_argument("--json", action="store_true", dest="as_json")
 
     return p
 
@@ -146,6 +165,86 @@ def main() -> int:
                 "mode": "watchdog_read_only",
             }
         _emit(payload, args.as_json)
+        return 0
+
+    if args.cmd == "space-audit":
+        report_dir = Path(args.report_dir)
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        snapshot = scan_space_usage(
+            root=args.root,
+            excludes=args.exclude,
+            depth=max(0, int(args.depth)),
+            audit_mode=True,
+        )
+        top_n = max(1, int(args.top_n))
+        top_dirs = summarize_top_dirs(snapshot, top_n=top_n)
+        by_ext = summarize_by_extension(snapshot, top_n=top_n)
+
+        previous_snapshot = None
+        previous_source = None
+        if args.compare_to is not None:
+            previous_source = str(args.compare_to)
+            previous_snapshot = json.loads(args.compare_to.read_text(encoding="utf-8"))
+        else:
+            previous_snapshot = resolve_previous_snapshot(
+                report_root=report_dir,
+                current_report_dir=report_dir,
+                scan_root=args.root,
+            )
+            if previous_snapshot is not None:
+                previous_source = "auto:latest-in-report-dir"
+
+        diff = None
+        if previous_snapshot is not None:
+            diff = diff_space_snapshots(snapshot, previous_snapshot)
+
+        timeline_payload = None
+        if args.watchdog_interval is not None or args.watchdog_duration is not None:
+            timeline_payload = service.run_free_space_watchdog(
+                root=args.root,
+                report_dir=report_dir,
+                interval_seconds=args.watchdog_interval if args.watchdog_interval is not None else 1.0,
+                duration_seconds=args.watchdog_duration,
+                max_rows=None,
+                spike_threshold_bytes=None,
+                cancel_flag=None,
+            )
+
+        artifacts = write_space_reports(
+            report_dir=report_dir,
+            snapshot=snapshot,
+            top_dirs=top_dirs,
+            by_ext=by_ext,
+            diff=diff,
+        )
+        summary = {
+            "command": "space-audit",
+            "mode": "read_only",
+            "safety": {
+                "destructive_actions_performed": False,
+                "safe_default": True,
+                "note": "This command only reads filesystem metadata, writes reports, and performs no delete/move/prune operations.",
+            },
+            "input": {
+                "root": str(args.root),
+                "depth": max(0, int(args.depth)),
+                "top_n": top_n,
+                "compare_to": previous_source,
+                "watchdog_interval": args.watchdog_interval,
+                "watchdog_duration": args.watchdog_duration,
+                "output_json": bool(args.as_json),
+                "report_dir": str(report_dir),
+            },
+            "totals": snapshot.get("totals", {}),
+            "compare": {
+                "enabled": diff is not None,
+                "summary": (diff or {}).get("summary"),
+            },
+            "artifacts": artifacts,
+            "watchdog": timeline_payload,
+        }
+        _emit(summary, args.as_json)
         return 0
 
     return 1
