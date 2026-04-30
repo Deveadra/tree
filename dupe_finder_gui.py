@@ -74,7 +74,6 @@ from dupe_core import (
     analyze_path_prefixes,
     compile_excludes,
     DEFAULT_EXCLUDES,
-    PROTECTED_PATH_DENYLIST,
     DupeGroup,
     FileRec,
     find_dupes_from_db,
@@ -85,6 +84,7 @@ from dupe_core import (
     new_run_id,
 )
 from core.models import ScanRequest
+from core.protection_policy import evaluate_delete_permission
 from core.service import (
     build_prune_plan,
     execute_prune_plan,
@@ -1184,21 +1184,6 @@ class MainWindow(QMainWindow):
 
         return None
 
-    def _is_under_any_root(self, path: Path) -> bool:
-        rp = path.resolve()
-        for root in self.allowed_roots:
-            rr = root.resolve()
-            if rp == rr or rr in rp.parents:
-                return True
-        return False
-
-    def _matches_protected_denylist(self, path: str) -> Optional[str]:
-        ps = os.path.normcase(os.path.normpath(os.path.expandvars(path)))
-        for pref in PROTECTED_PATH_DENYLIST:
-            n = os.path.normcase(os.path.normpath(os.path.expandvars(pref)))
-            if ps == n or ps.startswith(n + os.sep):
-                return n
-        return None
 
     # ----------------------------
     # Scan control
@@ -1655,24 +1640,17 @@ class MainWindow(QMainWindow):
 
         for p in delete_paths:
             try:
-                p_obj = Path(p)
-                if not self._is_under_any_root(p_obj):
-                    failed.append((p, "Path is outside selected scan roots"))
+                perm = evaluate_delete_permission(
+                    p, mode=mode, action_type="delete", safe_roots=self.allowed_roots
+                )
+                if not bool(perm.get("allow")):
+                    reason = str(perm.get("reason", "Blocked by protection policy"))
+                    code = str(perm.get("reason_code", "policy_deny"))
+                    failed.append((p, reason))
                     append_prune_event(
                         self.report_dir,
                         make_audit_event(
-                            self.session_id, "delete", p, "blocked", "outside_allowed_roots"
-                        ),
-                    )
-                    continue
-
-                deny = self._matches_protected_denylist(p)
-                if deny:
-                    failed.append((p, f"Protected denylist path: {deny}"))
-                    append_prune_event(
-                        self.report_dir,
-                        make_audit_event(
-                            self.session_id, "delete", p, "blocked", f"protected_path:{deny}"
+                            self.session_id, "delete", p, "blocked", f"{code}:{reason}"
                         ),
                     )
                     continue
