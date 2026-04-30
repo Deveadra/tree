@@ -404,6 +404,18 @@ def _parse_iso_datetime(value: Any) -> datetime:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
+def _window_rows(rows: list[dict[str, Any]], start_ts: str, end_ts: str) -> list[dict[str, Any]]:
+    start = _parse_iso_datetime(start_ts)
+    end = _parse_iso_datetime(end_ts)
+    if end < start:
+        start, end = end, start
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ts = _parse_iso_datetime(row.get("timestamp"))
+        if start <= ts <= end:
+            out.append(row)
+    return out
+
 
 def resolve_previous_snapshot(report_root: str | Path, current_report_dir: str | Path, scan_root: str | Path) -> dict[str, Any] | None:
     root = Path(report_root).resolve()
@@ -598,7 +610,10 @@ def write_space_reports(
 
     if timeline_row is not None:
         paths["timeline_row"] = str(out_dir / "space_timeline_row.json")
+        paths["timeline"] = str(out_dir / "space_timeline.json")
+        timeline_payload = {"schema_version": SCHEMA_VERSION, "generated_at": generated_at, "rows": [timeline_row]}
         write_json_atomic(Path(paths["timeline_row"]), {"schema_version": SCHEMA_VERSION, "row": timeline_row})
+        write_json_atomic(Path(paths["timeline"]), timeline_payload)
 
     warning_lines: list[str] = []
     for warning in snapshot.get("caveats", []):
@@ -1135,7 +1150,7 @@ def sample_free_space_timeline(
                     "free_bytes": free,
                     "used_bytes": used,
                     "free_delta_bytes": delta,
-                    "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
+                    "threshold_bytes": int(threshold),
                 }
                 top_dir_payload = {"rows": [{"dir": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)} for k, v in top_dir_deltas]}
                 top_ext_payload = {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]}
@@ -1255,15 +1270,32 @@ def sample_free_space_timeline(
                 event_window = {
                     "event_id": spikes[-1]["spike_event_id"],
                     "window_start": spikes[-1]["timestamp"],
-                    "window_end": spikes[-1]["timestamp"],
-                    "directory_growth_windows": [],
-                    "extension_surges": [],
+                    "window_end": _utc_now_iso(),
+                    "directory_growth_windows": [
+                        {"timestamp": _utc_now_iso(), "path": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)}
+                        for k, v in top_dir_deltas
+                    ],
+                    "extension_surges": [
+                        {"timestamp": _utc_now_iso(), "extension": k, "delta_bytes": int(v)}
+                        for k, v in top_ext_deltas
+                    ],
                     "process_io_deltas": [],
                 }
                 report = attribute_growth(event_window)
                 report_path = out_path.parent / f"attribution_report_{spikes[-1]['spike_event_id']}.json"
                 write_json_atomic(report_path, report)
                 attribution_reports.append(str(report_path))
+                relapse_bundle = create_replay_bookmark(
+                    out_path.parent,
+                    label="relapse detected",
+                    snapshot=current_snapshot,
+                    evidence_bundle={
+                        "manifest": manifest,
+                        "event_window": event_window,
+                    },
+                    suspect_report=report,
+                )
+                write_json_atomic(bundle_dir / "relapse_bookmark.json", relapse_bundle)
 
             writer.writerow([_utc_now_iso(), total, free, used, delta, int(spike)])
             handle.flush()
@@ -1349,6 +1381,8 @@ def sample_correlated_space_timeline(
     fast_rows = 0
     growth_rows = 0
     prev_snapshot: dict[str, Any] | None = None
+    growth_rows_payload: list[dict[str, Any]] = []
+    fast_rows_payload: list[dict[str, Any]] = []
     cancelled = False
     degradation: dict[str, Any] = {"sampling_lag_events": 0, "missed_ticks": 0, "api_failures": 0}
     heartbeat_file = Path(heartbeat_path) if heartbeat_path else (fast_path.parent / "collector_heartbeat.json")
@@ -1418,7 +1452,9 @@ def sample_correlated_space_timeline(
                 free = int(statvfs.f_bavail * statvfs.f_frsize)
                 used = max(0, total - free)
                 delta = 0 if previous_free is None else int(free - previous_free)
-                fast_writer.writerow([event_id, "fast", _utc_now_iso(), total, free, used, delta])
+                ts = _utc_now_iso()
+                fast_writer.writerow([event_id, "fast", ts, total, free, used, delta])
+                fast_rows_payload.append({"event_id": event_id, "timestamp": ts, "free_delta_bytes": delta, "free_bytes": free, "used_bytes": used})
                 fast_handle.flush()
                 os.fsync(fast_handle.fileno())
                 previous_free = free
@@ -1459,7 +1495,9 @@ def sample_correlated_space_timeline(
                         ext, delta = max(ext_delta.items(), key=lambda item: item[1])
                         top_ext = str(ext)
                         top_ext_growth = int(delta)
-                growth_writer.writerow([event_id, "growth", _utc_now_iso(), tree_delta, top_dir_path, top_dir_zone, top_dir_growth, top_ext, top_ext_growth])
+                ts = _utc_now_iso()
+                growth_writer.writerow([event_id, "growth", ts, tree_delta, top_dir_path, top_dir_zone, top_dir_growth, top_ext, top_ext_growth])
+                growth_rows_payload.append({"event_id": event_id, "timestamp": ts, "tree_bytes_delta": tree_delta, "top_dir_growth_path": top_dir_path, "top_dir_growth_zone": top_dir_zone, "top_dir_growth_bytes": top_dir_growth, "top_ext_growth": top_ext, "top_ext_growth_bytes": top_ext_growth})
                 growth_handle.flush()
                 os.fsync(growth_handle.fileno())
                 prev_snapshot = current_snapshot
@@ -1492,6 +1530,36 @@ def sample_correlated_space_timeline(
                 sleep_for = min(max(0.0, next_fast - now), max(0.0, next_growth - now))
                 time.sleep(min(0.25, sleep_for))
 
+    correlation_windows: list[dict[str, Any]] = []
+    for fast_row in fast_rows_payload:
+        if int(fast_row.get("free_delta_bytes", 0)) >= 0:
+            continue
+        start_ts = str(fast_row.get("timestamp"))
+        matching = _window_rows(growth_rows_payload, start_ts, start_ts)
+        if not matching:
+            continue
+        ranked = sorted(matching, key=lambda r: abs(int(r.get("top_dir_growth_bytes", 0))), reverse=True)
+        top = ranked[0]
+        correlation_windows.append({
+            "timestamp": start_ts,
+            "free_delta_bytes": int(fast_row.get("free_delta_bytes", 0)),
+            "top_dir_growth_path": top.get("top_dir_growth_path", ""),
+            "top_dir_growth_zone": top.get("top_dir_growth_zone", "unknown/system-managed"),
+            "top_dir_growth_bytes": int(top.get("top_dir_growth_bytes", 0)),
+            "top_ext_growth": top.get("top_ext_growth", ""),
+            "top_ext_growth_bytes": int(top.get("top_ext_growth_bytes", 0)),
+        })
+    partial_report = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "cancelled": cancelled,
+        "fast_rows_written": fast_rows,
+        "growth_rows_written": growth_rows,
+        "correlation_windows": correlation_windows,
+        "degradation": degradation,
+    }
+    partial_report_path = fast_path.parent / "correlated_timeline_partial_report.json"
+    write_json_atomic(partial_report_path, partial_report)
     return {
         "root": str(root_path),
         "output_fast_csv": str(fast_path),
@@ -1504,4 +1572,6 @@ def sample_correlated_space_timeline(
         "heartbeat_path": str(heartbeat_file),
         "state_path": str(state_file),
         "degradation": degradation,
+        "partial_report_path": str(partial_report_path),
+        "correlation_windows": correlation_windows,
     }
