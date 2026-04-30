@@ -97,3 +97,17 @@ def test_recommendations_include_redaction_impact_notes() -> None:
     rec = out["recommendations"][0]
     assert "redaction_impact" in rec
     assert "usernames" in rec["redaction_impact"]["hidden_fields"]
+
+
+def test_candidates_include_confidence_and_policy_validation() -> None:
+    evidence = _sample_evidence()
+    evidence["recommendation_candidates"][0]["proposed_action"] = {
+        "action": "delete",
+        "path": r"C:\\Windows\\System32\\drivers\\etc\\hosts",
+    }
+    out = build_recommendations(evidence)
+    rec = next(r for r in out["recommendations"] if r["id"] == "cache-cleanup")
+    assert 0.0 <= rec["confidence_score"] <= 1.0
+    assert rec["protection_policy_validation"]["ok"] is False
+    assert rec["protection_policy_validation"]["violations"]
+    assert rec["action_steps"] == []

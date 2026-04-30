@@ -107,6 +107,39 @@ def build_normalized_evidence(
     return evidence
 
 
+def build_evidence_from_space_outputs(
+    *,
+    run_id: str,
+    event_id: str,
+    space_audit_output: dict[str, Any],
+    space_watch_output: dict[str, Any],
+    policy_context_payload: dict[str, Any],
+) -> dict[str, Any]:
+    disk_metrics = dict(space_watch_output.get("disk_metrics", {}))
+    if not disk_metrics:
+        volume = space_audit_output.get("volume", {}) if isinstance(space_audit_output, dict) else {}
+        disk_metrics = {
+            "timestamp": _utc_now_iso(),
+            "free_bytes": int(volume.get("free_bytes", 0)),
+            "used_bytes": int(volume.get("used_bytes", 0)),
+            "free_delta_bytes": int(space_watch_output.get("free_delta_bytes", 0)),
+        }
+    return build_normalized_evidence(
+        run_id=run_id,
+        event_id=event_id,
+        disk_metrics_payload=disk_metrics,
+        top_dir_payload={"rows": list(space_audit_output.get("top_dirs", []))},
+        top_ext_payload={"rows": list(space_audit_output.get("top_extensions", []))},
+        process_io_payload=dict(space_watch_output.get("process_io", {})),
+        process_handles_payload=dict(space_watch_output.get("process_handles", {})),
+        plugin_payload=dict(space_watch_output.get("plugins", {})),
+        policy_context_payload=policy_context_payload,
+        user_notes=str(space_watch_output.get("operator_notes", "")),
+        user_context={"space_watch_event": event_id},
+        consent_state=dict(space_watch_output.get("consent_state", {})),
+    )
+
+
 def persist_normalized_evidence(case_or_run_dir: str | Path, evidence: dict[str, Any]) -> Path:
     validate_evidence_schema(evidence)
     out_dir = Path(case_or_run_dir)
@@ -114,3 +147,13 @@ def persist_normalized_evidence(case_or_run_dir: str | Path, evidence: dict[str,
     out_path = out_dir / "ai_evidence.json"
     write_json_atomic(out_path, evidence)
     return out_path
+
+
+def export_ai_case_outputs(case_or_run_dir: str | Path, report_payload: dict[str, Any], findings_lines: list[str]) -> tuple[Path, Path]:
+    out_dir = Path(case_or_run_dir)
+    safe_mkdir(out_dir)
+    case_report = out_dir / "ai_case_report.json"
+    findings_txt = out_dir / "ai_findings.txt"
+    write_json_atomic(case_report, report_payload)
+    findings_txt.write_text("\n".join(findings_lines).strip() + "\n", encoding="utf-8")
+    return case_report, findings_txt
