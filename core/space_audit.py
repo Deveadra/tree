@@ -18,6 +18,7 @@ from core.protection_policy import contains_protected_dir_name, is_under_protect
 
 from dupe_core import safe_mkdir, write_json_atomic
 from core.space_categories import classify_path
+from core.collector_plugins import load_collector_plugins, run_plugins_safely
 
 SCHEMA_VERSION = "1.1"
 
@@ -825,6 +826,7 @@ def sample_free_space_timeline(
     evidence_bundles: list[dict[str, Any]] = []
     non_recovery_events: list[dict[str, Any]] = []
     probable_deleted_open_events: list[dict[str, Any]] = []
+    plugin_failures = 0
     baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
@@ -993,6 +995,9 @@ def sample_free_space_timeline(
                 write_json_atomic(bundle_dir / "process_io_snapshot.json", _collect_io_snapshot())
                 deleted_handles = _scan_deleted_open_handles()
                 write_json_atomic(bundle_dir / "process_file_handles.json", deleted_handles)
+                plugin_payload = run_plugins_safely(root_path, plugins=load_collector_plugins())
+                plugin_failures += sum(1 for p in plugin_payload.get("plugins", []) if p.get("status") == "failed")
+                write_json_atomic(bundle_dir / "plugin_collectors.json", plugin_payload)
                 write_json_atomic(bundle_dir / "policy_context.json", {
                     "policy_path": str(Path(policy_path).resolve()) if policy_path else str(DEFAULT_TOML),
                     "enforce_safe_delete_roots": bool(protection_cfg.enforce_safe_delete_roots),
@@ -1010,6 +1015,7 @@ def sample_free_space_timeline(
                         "top_extension_deltas": str(bundle_dir / "top_extension_deltas.json"),
                         "process_io_snapshot": str(bundle_dir / "process_io_snapshot.json"),
                         "process_file_handles": str(bundle_dir / "process_file_handles.json"),
+                        "plugin_collectors": str(bundle_dir / "plugin_collectors.json"),
                         "policy_context": str(bundle_dir / "policy_context.json"),
                     },
                 }
@@ -1112,6 +1118,10 @@ def sample_free_space_timeline(
         "signals": {
             "non_recovery_despite_deletions": non_recovery_events,
             "probable_deleted_but_open": probable_deleted_open_events,
+        },
+        "plugins": {
+            "enabled": True,
+            "failure_count": plugin_failures,
         },
         "remediation": {
             "safety": "Never force-terminate processes automatically.",
