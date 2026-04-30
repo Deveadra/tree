@@ -63,25 +63,31 @@ from PySide6.QtWidgets import (
 
 from dupe_core import (
     analyze_path_prefixes,
-    append_prune_event,
     compile_excludes,
     DEFAULT_EXCLUDES,
     DupeGroup,
     FileRec,
-    find_dupes_from_db,
     fmt_duration,
     fmt_time,
     format_bytes,
     new_run_id,
+)
+from core.models import ScanRequest
+from core.service import (
+    build_prune_plan,
+    execute_prune_plan,
+    find_duplicates,
+    scan,
+)
+from core.reports import (
+    append_prune_event,
     safe_mkdir,
-    scan_root_to_db,
-    scan_roots_to_db,
     write_json_atomic,
     write_live_reports,
-    windows_recycle,
     write_scan_reports,
     write_path_suggestions,
     write_run_summary,
+    write_versioned_meta,
 )
 
 
@@ -196,7 +202,7 @@ class ScanWorker(QObject):
                 "cancel_reason": None,
             }
             try:
-                write_json_atomic(meta_path, meta)
+                write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
             self._persist_run_state(db_path, "created")
@@ -229,7 +235,6 @@ class ScanWorker(QObject):
                     metrics_cb=push,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
                     checkpoint_path=self.report_dir / "checkpoint_scan.json",
-                )
                 scan_stats = scan_stats_full.get("combined") or {
                     "listed": 0,
                     "indexed": 0,
@@ -267,7 +272,7 @@ class ScanWorker(QObject):
             meta["size_groups_total"] = size_groups_total
             meta["status"] = "indexed"
             try:
-                write_json_atomic(meta_path, meta)
+                write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
             self._persist_run_state(db_path, "indexed")
@@ -316,7 +321,7 @@ class ScanWorker(QObject):
                 except Exception:
                     pass
 
-            dupes = find_dupes_from_db(
+            dupes = find_duplicates(
                 db_path=db_path,
                 cancel_flag=self._cancel_flag,
                 metrics_cb=push,
@@ -330,7 +335,7 @@ class ScanWorker(QObject):
             meta["dupe_groups"] = len(dupes)
             meta["status"] = "applying"
             try:
-                write_json_atomic(meta_path, meta)
+                write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
             self._persist_run_state(db_path, "applying")
@@ -1577,7 +1582,9 @@ class MainWindow(QMainWindow):
         failed: list[tuple[str, str]] = []
 
         def try_recycle(p: str) -> None:
-            windows_recycle([p])
+            result = execute_prune_plan(build_prune_plan([p], mode="recycle"))
+            if result.failed:
+                raise RuntimeError(result.errors[0])
 
         def try_move_to_trash(p: str, td: Path) -> None:
             src = Path(p)

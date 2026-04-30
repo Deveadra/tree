@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from config.path_rules import canonicalize_path, validate_rule_inputs
 
 try:
     import tomllib  # py3.11+
@@ -16,9 +17,7 @@ DEFAULT_TOML = REPO_ROOT / "config" / "excludes.toml"
 
 
 def _norm(p: str) -> str:
-    # Expand %VARS%, normalize slashes, and make Windows comparisons case-insensitive.
-    expanded = os.path.expandvars(p)
-    return os.path.normcase(os.path.normpath(expanded))
+    return canonicalize_path(p).canonical
 
 
 def _csv_env(name: str) -> list[str] | None:
@@ -63,6 +62,8 @@ def load_exclude_prefixes(toml_path: Path = DEFAULT_TOML) -> list[str]:
             prefixes.append(_norm(p))
 
     add = _pathlist_env("DUPES_EXCLUDE_ADD") or []
+    for w in validate_rule_inputs(add):
+        print(f"[exclude-warning] {w}")
     rem = set(_norm(p) for p in (_pathlist_env("DUPES_EXCLUDE_REMOVE") or []))
 
     prefixes = [_norm(p) for p in prefixes] + [_norm(p) for p in add]
