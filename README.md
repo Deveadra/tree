@@ -107,3 +107,29 @@ Canonical import strategy: **flat-module imports with explicit test-runner PYTHO
 - Local test command: `pytest -q`
 - CI test command: `pytest -q`
 - Import smoke check: `python -c "import config.path_rules; print('ok')"`
+
+
+## Protection config (`config/protection.toml`)
+
+Schema:
+
+- `enforce_safe_delete_roots` (bool, default `true`): when enabled, delete candidates should stay under `safe_delete_roots`.
+- `protected_prefixes` (`list[str]`): absolute path prefixes that are always protected.
+- `protected_dir_names` (`list[str]`): directory names that are always protected regardless of absolute location.
+- `safe_delete_roots` (`list[str]`): allowed top-level roots for destructive delete operations when enforcement is enabled.
+
+Defaults and precedence (lowest -> highest):
+
+1. Built-in protected defaults (Windows system paths + reserved directory names).
+2. `config/protection.toml` values.
+3. Optional runtime/environment overrides:
+   - `DUPES_ENFORCE_SAFE_DELETE_ROOTS`
+   - `DUPES_PROTECTED_PREFIXES`
+   - `DUPES_PROTECTED_DIR_NAMES`
+   - `DUPES_SAFE_DELETE_ROOTS`
+
+Validation warnings:
+
+- malformed drive prefixes (example: `C:bad`) produce warnings.
+- unresolved `%ENV_VAR%` segments in path entries produce warnings.
+- enabling `enforce_safe_delete_roots` without any configured `safe_delete_roots` produces a warning.
