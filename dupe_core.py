@@ -32,6 +32,12 @@ class FileRec:
     size: int
     mtime: float
     root_id: int = 0  # 0=Root A, 1=Root B (compare mode)
+    inode: Optional[int] = None
+    device_id: Optional[int] = None
+    ctime: Optional[float] = None
+    nlink: Optional[int] = None
+    ext_hint: str = ""
+    mime_hint: str = ""
 
 
 @dataclass
@@ -464,17 +470,24 @@ def _db_create_schema(con: sqlite3.Connection) -> None:
     con.execute(
         """
         CREATE TABLE files (
-            path    TEXT PRIMARY KEY,
-            name    TEXT NOT NULL,
-            size    INTEGER NOT NULL,
-            mtime   REAL NOT NULL,
-            root_id INTEGER NOT NULL
+            path      TEXT PRIMARY KEY,
+            name      TEXT NOT NULL,
+            size      INTEGER NOT NULL,
+            mtime     REAL NOT NULL,
+            root_id   INTEGER NOT NULL,
+            inode     INTEGER,
+            device_id INTEGER,
+            ctime     REAL,
+            nlink     INTEGER,
+            ext_hint  TEXT,
+            mime_hint TEXT
         );
         """
     )
     con.execute("CREATE INDEX idx_files_size ON files(size);")
     con.execute("CREATE INDEX idx_files_name ON files(name);")
     con.execute("CREATE INDEX idx_files_root ON files(root_id);")
+    con.execute("CREATE INDEX idx_files_dev_inode ON files(device_id, inode);")
 
 
 def _scan_root_append_to_con(
@@ -520,7 +533,7 @@ def _scan_root_append_to_con(
     skipped = 0
     errors = 0
 
-    batch: list[tuple[str, str, int, float, int]] = []
+    batch: list[tuple[str, str, int, float, int, Optional[int], Optional[int], Optional[float], Optional[int], str, str]] = []
     last_emit = 0.0
     t0 = time.time()
 
@@ -596,6 +609,7 @@ def _scan_root_append_to_con(
                                 if size < min_size:
                                     skipped += 1
                                 else:
+                                    suffix = Path(name).suffix.lower()
                                     batch.append(
                                         (
                                             entry.path,
@@ -603,6 +617,12 @@ def _scan_root_append_to_con(
                                             size,
                                             float(st.st_mtime),
                                             int(root_id),
+                                            int(st.st_ino) if hasattr(st, "st_ino") else None,
+                                            int(st.st_dev) if hasattr(st, "st_dev") else None,
+                                            float(st.st_ctime) if hasattr(st, "st_ctime") else None,
+                                            int(st.st_nlink) if hasattr(st, "st_nlink") else None,
+                                            suffix,
+                                            "",
                                         )
                                     )
                                     indexed += 1
@@ -612,7 +632,7 @@ def _scan_root_append_to_con(
 
                             if len(batch) >= 5000:
                                 con.executemany(
-                                    "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id) VALUES (?,?,?,?,?)",
+                                    "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id,inode,device_id,ctime,nlink,ext_hint,mime_hint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                                     batch,
                                 )
                                 con.commit()
@@ -632,7 +652,7 @@ def _scan_root_append_to_con(
 
     if batch:
         con.executemany(
-            "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id) VALUES (?,?,?,?,?)",
+            "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id,inode,device_id,ctime,nlink,ext_hint,mime_hint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             batch,
         )
         con.commit()
@@ -833,7 +853,7 @@ def find_dupes_from_db(
 
             rows = con.execute(
                 """
-                SELECT path, name, size, mtime, root_id
+                SELECT path, name, size, mtime, root_id, inode, device_id, ctime, nlink, ext_hint, mime_hint
                 FROM files
                 WHERE size= ?
                 """,
@@ -849,6 +869,12 @@ def find_dupes_from_db(
                     size=int(r["size"]),
                     mtime=float(r["mtime"]),
                     root_id=int(r["root_id"]),
+                    inode=int(r["inode"]) if r["inode"] is not None else None,
+                    device_id=int(r["device_id"]) if r["device_id"] is not None else None,
+                    ctime=float(r["ctime"]) if r["ctime"] is not None else None,
+                    nlink=int(r["nlink"]) if r["nlink"] is not None else None,
+                    ext_hint=(r["ext_hint"] or ""),
+                    mime_hint=(r["mime_hint"] or ""),
                 )
                 for r in rows
             ]
@@ -891,12 +917,17 @@ def find_dupes_from_db(
                 break
 
             for digest, items in by_hash.items():
-                if len(items) > 1:
+                unique_items: list[FileRec] = []
+                for cand in items:
+                    if any(_same_file_identity(cand, ex) for ex in unique_items):
+                        continue
+                    unique_items.append(cand)
+                if len(unique_items) > 1:
                     dupes.append(
                         DupeGroup(
                             sha256=digest,
                             size=size,
-                            files=sorted(items, key=lambda x: x.path.lower()),
+                            files=sorted(unique_items, key=lambda x: x.path.lower()),
                         )
                     )
 
@@ -923,11 +954,67 @@ def find_dupes_from_db(
         con.close()
 
 
+def _same_file_identity(a: FileRec, b: FileRec) -> bool:
+    return (
+        a.device_id is not None
+        and a.inode is not None
+        and a.device_id == b.device_id
+        and a.inode == b.inode
+    )
+
+
+def classify_confidence_tier(group: DupeGroup) -> str:
+    return "Tier 1: size+hash exact duplicates"
+
+
+def score_retention_candidate(rec: FileRec, keep_roots: list[str], root_priority: dict[str, int], mode: str = "newest") -> tuple[float, list[str]]:
+    reasons: list[str] = []
+    score = 0.0
+    rec_path_norm = os.path.normcase(os.path.normpath(rec.path))
+    for kr in keep_roots:
+        nkr = os.path.normcase(os.path.normpath(kr))
+        if rec_path_norm == nkr or rec_path_norm.startswith(nkr + os.sep):
+            score += 1_000_000
+            reasons.append(f"protected_keep_root:{kr}")
+            break
+    if mode == "newest":
+        score += rec.mtime
+        reasons.append("newest")
+    elif mode == "oldest":
+        score -= rec.mtime
+        reasons.append("oldest")
+    elif mode == "largest":
+        score += rec.size
+        reasons.append("largest")
+    depth = len(Path(rec.path).parts)
+    score += depth * 0.01
+    reasons.append(f"path_depth={depth}")
+    for root, prio in root_priority.items():
+        nr = os.path.normcase(os.path.normpath(root))
+        if rec_path_norm == nr or rec_path_norm.startswith(nr + os.sep):
+            score += prio * 1000.0
+            reasons.append(f"root_priority:{root}={prio}")
+            break
+    return score, reasons
+
+
 def build_reports(dupes: list[DupeGroup]) -> tuple[list[dict], dict[str, list[dict]]]:
     by_hash: list[dict] = []
     by_name: dict[str, list[dict]] = defaultdict(list)
 
     for g in dupes:
+        scored = [
+            (
+                f,
+                *score_retention_candidate(
+                    f, keep_roots=[], root_priority={}, mode="newest"
+                ),
+            )
+            for f in g.files
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        keep_path = scored[0][0].path if scored else None
+        reason_by_path = {it[0].path: it[2] for it in scored}
         files = [
             {
                 "path": f.path,
@@ -935,11 +1022,20 @@ def build_reports(dupes: list[DupeGroup]) -> tuple[list[dict], dict[str, list[di
                 "size": f.size,
                 "mtime": f.mtime,
                 "root_id": int(getattr(f, "root_id", 0)),
+                "inode": getattr(f, "inode", None),
+                "device_id": getattr(f, "device_id", None),
+                "ctime": getattr(f, "ctime", None),
+                "nlink": getattr(f, "nlink", None),
+                "ext_hint": getattr(f, "ext_hint", ""),
+                "mime_hint": getattr(f, "mime_hint", ""),
+                "decision": "keep" if f.path == keep_path else "delete_candidate",
+                "decision_reasons": reason_by_path.get(f.path, []),
             }
             for f in g.files
         ]
 
         group = {
+            "confidence_tier": classify_confidence_tier(g),
             "sha256": g.sha256,
             "size": g.size,
             "count": len(g.files),
