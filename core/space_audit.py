@@ -8,6 +8,7 @@ import errno
 import os
 
 from dupe_core import safe_mkdir, write_json_atomic
+from core.space_categories import classify_path
 
 SCHEMA_VERSION = "1.1"
 
@@ -85,6 +86,8 @@ def scan_space_usage(
     dir_totals_allocated: Counter[str] = Counter()
     ext_totals: Counter[str] = Counter()
     ext_totals_allocated: Counter[str] = Counter()
+    category_totals: Counter[str] = Counter()
+    categorized_items: list[dict[str, Any]] = []
     file_count = 0
     skipped_count = 0
     errors: list[dict[str, Any]] = []
@@ -152,6 +155,19 @@ def scan_space_usage(
             ext_totals[ext] += size
             ext_totals_allocated[ext] += allocated
 
+            rel_path = str(file_path.relative_to(root_path)).replace("\\", "/")
+            category_meta = classify_path(rel_path)
+            category = str(category_meta["category"])
+            category_totals[category] += size
+            categorized_items.append({
+                "path": rel_path,
+                "bytes": size,
+                "allocated_bytes": allocated,
+                "category": category,
+                "matched_rule": category_meta["matched_rule"],
+                "confidence": float(category_meta["confidence"]),
+            })
+
             if metrics_cb is not None and file_count % 500 == 0:
                 metrics_cb(
                     {
@@ -166,6 +182,23 @@ def scan_space_usage(
     tree_total_allocated = int(dir_totals_allocated.get(".", 0))
     unattributed = int(volume_used - tree_total) if volume_total else 0
     reserved_or_system_managed_estimate = int(volume_used - tree_total_allocated) if volume_total else None
+
+    categorized_total = int(sum(category_totals.values()))
+    unknown_unattributed_bytes = max(0, tree_total - categorized_total)
+    if unknown_unattributed_bytes:
+        category_totals["system-managed / unattributed"] += unknown_unattributed_bytes
+    if unattributed > 0:
+        category_totals["system-managed / unattributed"] += int(unattributed)
+
+    denominator = (tree_total + max(0, unattributed)) if (tree_total + max(0, unattributed)) > 0 else 1
+    category_breakdown = [
+        {
+            "category": category,
+            "bytes": int(total),
+            "percent_of_tree": (float(total) / float(denominator)) * 100.0,
+        }
+        for category, total in sorted(category_totals.items(), key=lambda pair: pair[1], reverse=True)
+    ]
 
     if not volume_total:
         volume_info_confidence = "none"
@@ -204,6 +237,7 @@ def scan_space_usage(
         "caveats": volume_info_caveats,
         "tree": {"dir_bytes": dict(dir_totals), "dir_allocated_bytes": dict(dir_totals_allocated)},
         "extensions": {"ext_bytes": dict(ext_totals), "ext_allocated_bytes": dict(ext_totals_allocated)},
+        "categories": {"rows": category_breakdown, "items": categorized_items},
         "errors": errors,
     }
 

@@ -49,5 +49,26 @@ class SpaceAuditMetricsTests(unittest.TestCase):
             self.assertEqual(snapshot["tree"]["dir_bytes"].get("."), snapshot["tree"]["dir_allocated_bytes"].get("."))
 
 
+
+    def test_includes_category_rows_and_item_metadata(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "docs").mkdir()
+            (root / "docs" / "file.txt").write_bytes(b"x" * 12)
+
+            snapshot = scan_space_usage(root, excludes=[])
+
+            self.assertIn("categories", snapshot)
+            self.assertIn("rows", snapshot["categories"])
+            self.assertIn("items", snapshot["categories"])
+            self.assertGreaterEqual(len(snapshot["categories"]["items"]), 1)
+            item = snapshot["categories"]["items"][0]
+            self.assertIn("matched_rule", item)
+            self.assertIn("category", item)
+            self.assertIn("confidence", item)
+
+            categories = {row["category"] for row in snapshot["categories"]["rows"]}
+            self.assertIn("system-managed / unattributed", categories)
+
 if __name__ == "__main__":
     unittest.main()
