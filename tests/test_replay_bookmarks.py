@@ -23,7 +23,11 @@ def test_create_bookmarks_and_replay_diff_and_export_incident():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         evidence = {"event_id": "spike-1", "bundle_dir": str(root / "evidence_bundle_spike-1")}
-        suspects = {"suspects": [{"name": "OneDrive.exe", "confidence_tier": "high"}]}
+        suspects = {
+            "suspects": [{"name": "OneDrive.exe", "confidence_tier": "high"}],
+            "confidence": {"tier_criteria": {"high": "x"}},
+            "ambiguity": {"contradictions": [], "what_evidence_would_disambiguate_this": ["y"]},
+        }
         pre = create_replay_bookmark(root, "pre-cleanup", before)
         relapse = create_replay_bookmark(root, "relapse detected", after, evidence_bundle=evidence, suspect_report=suspects)
         view = build_replay_diff_view(pre, relapse, top_n_regrowth_sources=5)
@@ -38,6 +42,8 @@ def test_create_bookmarks_and_replay_diff_and_export_incident():
         assert report_path.exists()
         text = report_path.read_text(encoding="utf-8")
         assert "top_regrowth_sources" in text
+        assert "\"confidence\"" in text
+        assert "\"ambiguity\"" in text
 
 
 def test_rejects_invalid_bookmark_label():

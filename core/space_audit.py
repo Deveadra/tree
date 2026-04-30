@@ -704,6 +704,16 @@ def export_incident_summary(report_dir: str | Path, replay_view: dict[str, Any])
     out_dir = Path(report_dir)
     safe_mkdir(out_dir)
     path = out_dir / "incident_summary.json"
+    confidence_sections: list[dict[str, Any]] = []
+    ambiguity_sections: list[dict[str, Any]] = []
+    for row in replay_view.get("top_regrowth_sources", []) or []:
+        suspect = row.get("suspect_attribution", {})
+        if isinstance(suspect, dict):
+            if suspect.get("confidence"):
+                confidence_sections.append(suspect.get("confidence", {}))
+            if suspect.get("ambiguity"):
+                ambiguity_sections.append(suspect.get("ambiguity", {}))
+
     write_json_atomic(path, {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
@@ -713,6 +723,8 @@ def export_incident_summary(report_dir: str | Path, replay_view: dict[str, Any])
             "net_change_bytes": replay_view.get("totals", {}).get("net_change_bytes", 0),
             "top_regrowth_sources": replay_view.get("top_regrowth_sources", []),
         },
+        "confidence": confidence_sections,
+        "ambiguity": ambiguity_sections,
     })
     return path
 
@@ -800,21 +812,69 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
         item["evidence"].append({"type": "process_io_delta", "reference": proc, "write_bytes_delta": delta})
 
     ranked = sorted(suspects.values(), key=lambda x: x["score"], reverse=True)
+    evidence_disambiguation_hints = [
+        "Capture per-process file path write samples during the spike window.",
+        "Collect two adjacent snapshots (before/after) with top directory and extension deltas.",
+        "Enable process handle scan to confirm deleted-but-open space retention.",
+    ]
+
+    process_rows = event_window.get("process_io_deltas", []) or []
+    directory_rows = event_window.get("directory_growth_windows", []) or []
+    io_has_direct = any(bool(row.get("direct_writer", False)) for row in process_rows)
+    io_total = sum(max(0, int(row.get("write_bytes_delta", 0))) for row in process_rows)
+    dir_total = sum(max(0, int(row.get("delta_bytes", 0))) for row in directory_rows)
+    contradiction_flags: list[str] = []
+    if io_total == 0 and dir_total > 0:
+        contradiction_flags.append("directory_growth_without_corresponding_process_io")
+    if io_has_direct and dir_total == 0:
+        contradiction_flags.append("process_io_direct_writer_without_directory_growth")
+
+    if contradiction_flags:
+        evidence_disambiguation_hints.append("Increase process IO sampling cadence; current signals conflict.")
+
     for item in ranked:
         score = float(item["score"])
         item["score"] = round(score, 2)
-        if score >= 20:
+        evidence_count = len(item.get("evidence", []))
+        if score >= 20 and evidence_count >= 2 and item["observation"] == "directly_observed_writer":
             item["confidence_tier"] = "high"
-        elif score >= 8:
+        elif score >= 8 and evidence_count >= 2:
             item["confidence_tier"] = "medium"
         else:
             item["confidence_tier"] = "low"
+        if item["confidence_tier"] in {"medium", "low"}:
+            item["alternate_hypotheses"] = [
+                "A background sync/cache process caused the growth.",
+            ]
+
+    confidence_summary = {
+        "tier_criteria": {
+            "high": "directly observed writer + >=2 evidence points + strong correlation score",
+            "medium": "moderate score with >=2 evidence points but incomplete direct attribution",
+            "low": "weak score or sparse/conflicting evidence",
+        },
+        "evidence_completeness": {
+            "directory_growth_windows": len(directory_rows),
+            "extension_surges": len(event_window.get("extension_surges", []) or []),
+            "process_io_deltas": len(process_rows),
+        },
+        "correlation_strength": {
+            "directory_growth_total_bytes": dir_total,
+            "process_io_total_write_bytes": io_total,
+        },
+    }
+    ambiguity_summary = {
+        "contradictions": contradiction_flags,
+        "what_evidence_would_disambiguate_this": evidence_disambiguation_hints,
+    }
 
     return {
         "event_id": event_window.get("event_id"),
         "window_start": event_window.get("window_start"),
         "window_end": event_window.get("window_end"),
         "suspects": ranked,
+        "confidence": confidence_summary,
+        "ambiguity": ambiguity_summary,
     }
 
 

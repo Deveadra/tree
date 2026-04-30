@@ -41,3 +41,21 @@ def test_attribute_growth_marks_inferred_suspects():
     report = attribute_growth(event)
     observations = {item["observation"] for item in report["suspects"]}
     assert "inferred_suspect" in observations
+    assert "confidence" in report
+    assert "ambiguity" in report
+    assert report["ambiguity"]["what_evidence_would_disambiguate_this"]
+
+
+def test_attribute_growth_adds_alternate_hypothesis_for_non_high_confidence():
+    event = {
+        "event_id": "spike-3",
+        "window_start": "2026-01-01T00:00:00Z",
+        "window_end": "2026-01-01T00:01:00Z",
+        "directory_growth_windows": [
+            {"path": "/tmp/cache", "delta_bytes": 2 * 1024 * 1024}
+        ],
+        "extension_surges": [],
+        "process_io_deltas": [],
+    }
+    report = attribute_growth(event)
+    assert any("alternate_hypotheses" in suspect for suspect in report["suspects"])
