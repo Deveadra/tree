@@ -230,6 +230,8 @@ def plan_prune(
         safe_delete_roots=safe_delete_roots,
     )
 
+    plan_actions = [*compliance["safe_actions"], *compliance["rewritten_actions"]]
+
     plan = {
         "schema": "plan-prune",
         "metadata": {
@@ -242,7 +244,7 @@ def plan_prune(
             },
         },
         "groups": len(groups),
-        "actions": compliance["safe_actions"],
+        "actions": plan_actions,
         "files_to_prune": len(compliance["safe_actions"]),
         "bytes_reclaimable": sum(int(a.get("size", 0)) for a in compliance["safe_actions"]),
         "dry_run_default": True,
@@ -300,6 +302,33 @@ def apply_prune(
         reason = None
 
         action_mode = str(a.get("action", "delete"))
+
+        if action_mode == "skip":
+            violations = a.get("violations") if isinstance(a.get("violations"), list) else []
+            violation = violations[0] if violations and isinstance(violations[0], dict) else {}
+            reason_code = str(violation.get("reason_code") or a.get("reason") or "policy_deny")
+            results["skipped"] += 1
+            results["blocked"] += 1
+            blocked_reasons = results["blocked_reasons"]
+            blocked_reasons[reason_code] = int(blocked_reasons.get(reason_code, 0)) + 1
+            blocked_paths_by_reason.setdefault(reason_code, []).append(str(p))
+            if audit_log:
+                append_prune_event(
+                    audit_log,
+                    _audit_payload(
+                        {
+                            "action": a.get("action"),
+                            "path": str(p),
+                            "status": "skip",
+                            "reason_code": reason_code,
+                            "reason": str(violation.get("message") or "Blocked by policy firewall"),
+                        },
+                        decision="blocked",
+                        reason_code=reason_code,
+                        matched_rule=policy_rule_map.get(reason_code, "policy_default_deny"),
+                    ),
+                )
+            continue
 
         if not p.exists():
             reason = "file_missing"
