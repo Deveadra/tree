@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -11,6 +11,7 @@ from core.actions import build_prune_plan, execute_prune_plan
 from core.hash_index import find_duplicates as hash_find_duplicates
 from core.models import DuplicateResultGroup, ScanRequest
 from core.protection_policy import evaluate_delete_permission
+from config.protection_loader import DEFAULT_TOML, resolve_protection_config
 from dupe_core import (
     DupeGroup,
     analyze_path_prefixes,
@@ -169,12 +170,16 @@ def apply_prune(
     audit_log: Path | None = None,
     enforce_safe_delete_roots: bool = False,
     safe_delete_roots: list[Path] | None = None,
+    policy_path: Path | None = None,
 ) -> dict[str, Any]:
     _validate_plan_structure(plan)
     _verify_plan_checksum(plan)
 
     if not dry_run and not yes:
         raise ValueError("Refusing destructive action without --yes")
+
+    policy_cfg = resolve_protection_config(policy_path or DEFAULT_TOML)
+    policy_cfg = replace(policy_cfg, enforce_safe_delete_roots=enforce_safe_delete_roots)
 
     results = {
         "applied": 0,
@@ -189,12 +194,34 @@ def apply_prune(
         snapshot = a.get("snapshot", {})
         reason = None
 
-        if enforce_safe_delete_roots:
+        action_mode = str(a.get("action", "delete"))
+
+        if not p.exists():
+            reason = "file_missing"
+        elif snapshot.get("size") is not None and p.stat().st_size != snapshot.get("size"):
+            reason = "size_changed"
+        elif snapshot.get("mtime") is not None and int(p.stat().st_mtime) != snapshot.get("mtime"):
+            reason = "mtime_changed"
+
+        if reason:
+            results["skipped"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": reason})
+            continue
+
+        if dry_run:
+            results["skipped"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": "dry_run"})
+            continue
+
+        if action_mode in {"recycle", "delete", "move"}:
             perm = evaluate_delete_permission(
                 str(p),
-                mode=str(a.get("action", "delete")),
+                mode=action_mode,
                 action_type="delete",
-                safe_roots=safe_delete_roots,
+                safe_roots=safe_delete_roots if enforce_safe_delete_roots else None,
+                policy=policy_cfg,
             )
             if not bool(perm.get("allow")):
                 reason_code = str(perm.get("reason_code", "policy_deny"))
@@ -215,25 +242,6 @@ def apply_prune(
                         },
                     )
                 continue
-
-        if not p.exists():
-            reason = "file_missing"
-        elif snapshot.get("size") is not None and p.stat().st_size != snapshot.get("size"):
-            reason = "size_changed"
-        elif snapshot.get("mtime") is not None and int(p.stat().st_mtime) != snapshot.get("mtime"):
-            reason = "mtime_changed"
-
-        if reason:
-            results["skipped"] += 1
-            if audit_log:
-                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": reason})
-            continue
-
-        if dry_run:
-            results["skipped"] += 1
-            if audit_log:
-                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": "dry_run"})
-            continue
 
         ok = windows_recycle(p)
         if ok:
