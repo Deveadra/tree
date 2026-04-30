@@ -1,0 +1,73 @@
+[excludes]
+# What you enable by default (so the core code doesn’t enumerate paths)
+enabled_groups = [
+  "windows_protected",
+  "user_legacy_junctions",
+  "programdata_protected",
+  "app_caches",
+  "user_cache",
+  "appx_wp_system"
+]
+
+[excludes.groups.windows_protected]
+paths = [
+  '%SystemRoot%\System32\config',
+  '%SystemRoot%\SysWOW64\config',
+  '%SystemRoot%\System32\LogFiles',
+  '%SystemRoot%\System32\WebThreatDefSvc',
+  '%SystemRoot%\SystemTemp',
+  '%SystemRoot%\Temp',
+  'C:\Recovery',
+  'C:\Documents and Settings',
+  'C:\Windows'
+]
+
+[excludes.groups.user_legacy_junctions]
+paths = [
+  '%USERPROFILE%\Application Data',
+  '%USERPROFILE%\Local Settings',
+  '%USERPROFILE%\My Documents',
+  '%USERPROFILE%\Cookies',
+  '%USERPROFILE%\Recent',
+  '%USERPROFILE%\SendTo',
+  '%USERPROFILE%\Start Menu',
+  '%USERPROFILE%\Templates',
+  '%USERPROFILE%\NetHood',
+  '%USERPROFILE%\PrintHood'
+]
+
+[excludes.groups.user_cache]
+paths = [
+  '%LOCALAPPDATA%\Packages',
+  '%LOCALAPPDATA%\Packages\',
+  '%LOCALAPPDATA%\Microsoft\Windows\INetCache\',
+  '%LOCALAPPDATA%\Microsoft\Windows\Temporary Internet Files\',
+  '%LOCALAPPDATA%\Microsoft\Edge\User Data\',
+  '%LOCALAPPDATA%\Google\Chrome\User Data\',
+  '%LOCALAPPDATA%\Zoom\data\WebviewCacheX64\',
+  '%LOCALAPPDATA%\Telegram Desktop\tdata\user_data\media_cache\'
+]
+
+[excludes.groups.programdata_protected]
+paths = [
+  'C:\ProgramData',
+  'C:\ProgramData\Microsoft\Windows\SystemData',
+  'C:\ProgramData\Microsoft\Windows\CapabilityAccessManager',
+  'C:\ProgramData\Microsoft\Windows Defender',
+  'C:\ProgramData\Packages'
+]
+
+[excludes.groups.app_caches]
+paths = [
+  '%LOCALAPPDATA%\Microsoft\Windows\INetCache',
+  '%LOCALAPPDATA%\Microsoft\Windows\Temporary Internet Files',
+  '%LOCALAPPDATA%\History'
+]
+
+[excludes.groups.appx_wp_system]
+paths = [
+  'E:\WpSystem',
+  'E:\WindowsApps',
+  'E:\$Recycle.Bin',
+  'E:\System Volume Information'
+]
