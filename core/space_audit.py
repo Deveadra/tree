@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 import json
+import hashlib
 import errno
 import os
 import time
 import tempfile
+import resource
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix, is_within_safe_delete_roots
@@ -594,6 +596,85 @@ def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
     }
 
 
+ALLOWED_BOOKMARKS = {"pre-cleanup", "post-cleanup", "relapse detected"}
+
+
+def create_replay_bookmark(
+    bookmark_dir: str | Path,
+    label: str,
+    snapshot: dict[str, Any],
+    evidence_bundle: dict[str, Any] | None = None,
+    suspect_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = str(label).strip().lower()
+    if normalized not in ALLOWED_BOOKMARKS:
+        raise ValueError(f"Unsupported bookmark label: {label}")
+    out_dir = Path(bookmark_dir)
+    safe_mkdir(out_dir)
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "bookmark": normalized,
+        "created_at": _utc_now_iso(),
+        "snapshot": snapshot,
+    }
+    if evidence_bundle is not None:
+        payload["evidence_bundle"] = evidence_bundle
+    if suspect_report is not None:
+        payload["suspect_attribution"] = suspect_report
+    out_path = out_dir / f"bookmark_{normalized.replace(' ', '_').replace('-', '_')}.json"
+    write_json_atomic(out_path, payload)
+    return payload
+
+
+def build_replay_diff_view(
+    from_bookmark: dict[str, Any],
+    to_bookmark: dict[str, Any],
+    top_n_regrowth_sources: int = 10,
+    policy_path: str | Path | None = None,
+) -> dict[str, Any]:
+    from_snapshot = from_bookmark.get("snapshot", {})
+    to_snapshot = to_bookmark.get("snapshot", {})
+    diff = diff_space_snapshots(to_snapshot, from_snapshot, policy_path=policy_path)
+    growth = diff.get("tree", {}).get("ranked_growth", [])[: max(1, int(top_n_regrowth_sources))]
+    replay_entries: list[dict[str, Any]] = []
+    for row in growth:
+        replay_entries.append(
+            {
+                "path": row.get("path"),
+                "delta_bytes": int(row.get("delta_bytes", 0)),
+                "zone_tag": row.get("zone_tag"),
+                "evidence_bundle": to_bookmark.get("evidence_bundle", {}),
+                "suspect_attribution": to_bookmark.get("suspect_attribution", {}),
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "from_bookmark": from_bookmark.get("bookmark"),
+        "to_bookmark": to_bookmark.get("bookmark"),
+        "totals": diff.get("totals", {}),
+        "top_regrowth_sources": replay_entries,
+        "diff": diff,
+    }
+
+
+def export_incident_summary(report_dir: str | Path, replay_view: dict[str, Any]) -> Path:
+    out_dir = Path(report_dir)
+    safe_mkdir(out_dir)
+    path = out_dir / "incident_summary.json"
+    write_json_atomic(path, {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "incident": {
+            "from_bookmark": replay_view.get("from_bookmark"),
+            "to_bookmark": replay_view.get("to_bookmark"),
+            "net_change_bytes": replay_view.get("totals", {}).get("net_change_bytes", 0),
+            "top_regrowth_sources": replay_view.get("top_regrowth_sources", []),
+        },
+    })
+    return path
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "scan_space_usage",
@@ -1052,6 +1133,13 @@ def sample_correlated_space_timeline(
     duration_seconds: float | None = None,
     max_fast_rows: int | None = None,
     max_growth_rows: int | None = None,
+    heartbeat_path: str | Path | None = None,
+    heartbeat_interval_seconds: float = 5.0,
+    liveness_timeout_seconds: float = 30.0,
+    rotate_bytes: int = 5 * 1024 * 1024,
+    restart_state_path: str | Path | None = None,
+    max_cpu_seconds: int | None = None,
+    max_memory_bytes: int | None = None,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Capture two correlated telemetry streams with drift-safe monotonic scheduling.
@@ -1064,6 +1152,10 @@ def sample_correlated_space_timeline(
     growth_path = Path(output_growth_csv)
     safe_mkdir(fast_path.parent)
     safe_mkdir(growth_path.parent)
+    if max_cpu_seconds is not None and max_cpu_seconds > 0:
+        resource.setrlimit(resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
+    if max_memory_bytes is not None and max_memory_bytes > 0:
+        resource.setrlimit(resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
 
     start_mono = time.monotonic()
     next_fast = start_mono
@@ -1073,6 +1165,33 @@ def sample_correlated_space_timeline(
     growth_rows = 0
     prev_snapshot: dict[str, Any] | None = None
     cancelled = False
+    degradation: dict[str, Any] = {"sampling_lag_events": 0, "missed_ticks": 0, "api_failures": 0}
+    heartbeat_file = Path(heartbeat_path) if heartbeat_path else (fast_path.parent / "collector_heartbeat.json")
+    hb_interval = max(0.1, float(heartbeat_interval_seconds))
+    live_timeout = max(hb_interval, float(liveness_timeout_seconds))
+    next_heartbeat = start_mono
+    last_heartbeat = start_mono
+    state_file = Path(restart_state_path) if restart_state_path else (fast_path.parent / "collector_state.json")
+
+    def _append_row_safe(path: Path, row: str) -> None:
+        if path.exists() and path.stat().st_size >= max(256, int(rotate_bytes)):
+            rotated = path.with_suffix(path.suffix + f".{int(time.time())}.log")
+            os.replace(path, rotated)
+        checksum = hashlib.sha256(row.encode("utf-8")).hexdigest()
+        with path.open("a", encoding="utf-8") as marker:
+            marker.write(f"#checksum:{checksum}\n")
+            marker.write(row)
+            marker.flush()
+            os.fsync(marker.fileno())
+
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            seq = int(state.get("seq", 0))
+            fast_rows = int(state.get("fast_rows", 0))
+            growth_rows = int(state.get("growth_rows", 0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            degradation["api_failures"] += 1
 
     with fast_path.open("w", newline="", encoding="utf-8") as fast_handle, growth_path.open("w", newline="", encoding="utf-8") as growth_handle:
         fast_writer = csv.writer(fast_handle)
@@ -1097,10 +1216,19 @@ def sample_correlated_space_timeline(
                 break
 
             did_work = False
+            if now - next_fast > max(0.0, float(fast_interval_seconds)) * 1.5:
+                degradation["sampling_lag_events"] += 1
+            if now - next_growth > max(0.0, float(growth_interval_seconds)) * 1.5:
+                degradation["sampling_lag_events"] += 1
             if now >= next_fast and (max_fast_rows is None or fast_rows < max_fast_rows):
                 seq += 1
                 event_id = f"evt-{seq:08d}"
-                statvfs = os.statvfs(root_path)
+                try:
+                    statvfs = os.statvfs(root_path)
+                except OSError:
+                    degradation["api_failures"] += 1
+                    next_fast += max(0.001, float(fast_interval_seconds))
+                    continue
                 total = int(statvfs.f_blocks * statvfs.f_frsize)
                 free = int(statvfs.f_bavail * statvfs.f_frsize)
                 used = max(0, total - free)
@@ -1112,13 +1240,21 @@ def sample_correlated_space_timeline(
                 fast_rows += 1
                 did_work = True
                 fast_interval = max(0.001, float(fast_interval_seconds))
+                skipped = 0
                 while next_fast <= now:
                     next_fast += fast_interval
+                    skipped += 1
+                degradation["missed_ticks"] += max(0, skipped - 1)
 
             if now >= next_growth and (max_growth_rows is None or growth_rows < max_growth_rows):
                 seq += 1
                 event_id = f"evt-{seq:08d}"
-                current_snapshot = scan_space_usage(root=root_path, excludes=[], depth=2, audit_mode=True)
+                try:
+                    current_snapshot = scan_space_usage(root=root_path, excludes=[], depth=2, audit_mode=True)
+                except OSError:
+                    degradation["api_failures"] += 1
+                    next_growth += max(0.001, float(growth_interval_seconds))
+                    continue
                 tree_delta = 0
                 top_dir_path = ""
                 top_dir_growth = 0
@@ -1145,8 +1281,27 @@ def sample_correlated_space_timeline(
                 growth_rows += 1
                 did_work = True
                 growth_interval = max(0.001, float(growth_interval_seconds))
+                skipped = 0
                 while next_growth <= now:
                     next_growth += growth_interval
+                    skipped += 1
+                degradation["missed_ticks"] += max(0, skipped - 1)
+
+            if now >= next_heartbeat:
+                liveness = "alive" if (now - last_heartbeat) <= live_timeout else "degraded"
+                payload = {
+                    "timestamp": _utc_now_iso(),
+                    "liveness": liveness,
+                    "seq": seq,
+                    "fast_rows": fast_rows,
+                    "growth_rows": growth_rows,
+                    "degradation": degradation,
+                }
+                write_json_atomic(heartbeat_file, payload)
+                _append_row_safe(heartbeat_file.with_suffix(".log"), json.dumps(payload, sort_keys=True) + "\n")
+                write_json_atomic(state_file, {"seq": seq, "fast_rows": fast_rows, "growth_rows": growth_rows})
+                last_heartbeat = now
+                next_heartbeat = now + hb_interval
 
             if not did_work:
                 sleep_for = min(max(0.0, next_fast - now), max(0.0, next_growth - now))
@@ -1161,4 +1316,7 @@ def sample_correlated_space_timeline(
         "cancelled": cancelled,
         "duration_seconds": float(time.monotonic() - start_mono),
         "mode": "watchdog_correlated_read_only",
+        "heartbeat_path": str(heartbeat_file),
+        "state_path": str(state_file),
+        "degradation": degradation,
     }
