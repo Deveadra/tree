@@ -8,6 +8,8 @@ from core.ai.outcomes_tracker import (
     update_heuristic_weights,
     purge_expired_case_reports,
     EvidenceRetentionConfig,
+    build_outcome_quality_dashboard,
+    tune_rule_weights_from_history,
 )
 
 
@@ -76,3 +78,38 @@ def test_purge_expired_case_reports(tmp_path: Path) -> None:
     assert result["purged"] == 1
     assert not old.exists()
     assert keep.exists()
+
+
+def test_outcome_quality_dashboard_and_windows() -> None:
+    row = build_action_outcome_record(
+        case_id="case-1",
+        action_id="a-1",
+        action="recycle",
+        pre_free_bytes=100,
+        post_free_bytes=150,
+        predicted_reclaim_bytes=50,
+        free_bytes_windows={"5m": 145, "30m": 148},
+        recommendation_label="helpful",
+    )
+    assert row["disk_metrics"]["reclaim_ratio"] == 1.0
+    assert row["disk_metrics"]["persistence_deltas_bytes"]["5m"] == -5
+    dash = build_outcome_quality_dashboard([row])
+    assert dash["actions"] == 1
+    assert dash["precision"] == 1.0
+
+
+def test_rule_weight_tuning_sparse_or_contradictory_is_stable() -> None:
+    base = {"r1": 0.4}
+    sparse = tune_rule_weights_from_history(base, outcomes=[{"rule_id": "r1", "recommendation_label": "helpful"}], config=OutcomeLearningConfig(min_samples_for_tuning=3))
+    assert sparse == base
+
+    contradictory = tune_rule_weights_from_history(
+        base,
+        outcomes=[
+            {"rule_id": "r1", "recommendation_label": "helpful"},
+            {"rule_id": "r1", "recommendation_label": "misleading"},
+            {"rule_id": "r1", "recommendation_label": "neutral"},
+        ],
+        config=OutcomeLearningConfig(adaptation_rate=0.2, min_samples_for_tuning=3),
+    )
+    assert contradictory["r1"] == base["r1"]

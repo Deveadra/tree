@@ -127,3 +127,18 @@ def test_candidates_include_confidence_and_policy_validation() -> None:
     assert rec["protection_policy_validation"]["ok"] is False
     assert rec["protection_policy_validation"]["violations"]
     assert rec["action_steps"] == []
+
+
+def test_suspect_ranking_uses_io_growth_correlation_when_windows_present() -> None:
+    evidence = _sample_evidence()
+    evidence["recommendation_candidates"][0]["metrics"]["process_io_ratio"] = 0.9
+    evidence["recommendation_candidates"][0]["metrics"]["top_dir_growth_ratio"] = 0.9
+    evidence["recommendation_candidates"][0]["metrics"]["growth_windows"] = {"5m": 0.9, "30m": 0.9}
+    evidence["recommendation_candidates"][1]["metrics"]["process_io_ratio"] = 0.1
+    evidence["recommendation_candidates"][1]["metrics"]["top_dir_growth_ratio"] = 0.1
+    evidence["recommendation_candidates"][1]["metrics"]["growth_windows"] = {"5m": 0.1, "30m": 0.1}
+
+    out = build_recommendations(evidence)
+    assert out["rankings"]["root_cause"][0] == "cache-cleanup"
+    top = out["recommendations"][0]
+    assert "io_growth_correlation" in top["score_components"]["root_cause"]

@@ -44,7 +44,8 @@ DEFAULT_CONFIG = RecommendationConfig(
     root_cause_weights={
         "free_delta_severity": 0.45,
         "top_dir_impact": 0.35,
-        "process_io_impact": 0.20,
+        "process_io_impact": 0.15,
+        "io_growth_correlation": 0.05,
     },
     reclaim_weights={
         "duplicate_reclaim_ratio": 0.5,
@@ -85,6 +86,17 @@ def _score_weighted(components: dict[str, float], weights: dict[str, float]) -> 
     if weight_sum == 0:
         return 0.0
     return weighted_sum / weight_sum
+
+
+def _correlated_io_growth_score(metrics: dict[str, Any]) -> float:
+    io_ratio = _clamp01(_safe_float(metrics.get("process_io_ratio", 0.0)))
+    growth_ratio = _clamp01(_safe_float(metrics.get("top_dir_growth_ratio", 0.0)))
+    windows = metrics.get("growth_windows", {}) if isinstance(metrics.get("growth_windows"), dict) else {}
+    window_strength = 0.0
+    if windows:
+        values = [_clamp01(_safe_float(v, 0.0)) for v in windows.values()]
+        window_strength = sum(values) / len(values)
+    return _clamp01((io_ratio * 0.45) + (growth_ratio * 0.45) + (window_strength * 0.10))
 
 
 def _risk_tier(risk_score: float, thresholds: dict[str, float]) -> str:
@@ -200,6 +212,7 @@ def build_recommendations(
             "free_delta_severity": _clamp01(abs(_safe_float(metrics.get("free_delta_ratio", 0.0)))),
             "top_dir_impact": _clamp01(_safe_float(metrics.get("top_dir_growth_ratio", 0.0))),
             "process_io_impact": _clamp01(_safe_float(metrics.get("process_io_ratio", 0.0))),
+            "io_growth_correlation": _correlated_io_growth_score(metrics),
         }
         reclaim_components = {
             "duplicate_reclaim_ratio": _clamp01(_safe_float(metrics.get("duplicate_reclaim_ratio", 0.0))),
