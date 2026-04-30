@@ -124,6 +124,58 @@ def test_watchdog_cancellation_skips_snapshot_scan(monkeypatch):
         )
         assert result["cancelled"] is True
         assert result["rows_written"] == 0
+
+
+def test_first_spike_diff_uses_pre_spike_baseline(monkeypatch):
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_csv = root / "free_space_timeline.csv"
+        free_values = iter([1_000_000, 900_000])
+
+        class _FakeStatVfs:
+            f_frsize = 1
+            f_blocks = 2_000_000
+
+            def __init__(self, free_bytes: int) -> None:
+                self.f_bavail = free_bytes
+
+        scan_calls: list[str] = []
+        diff_inputs: list[tuple[str, str]] = []
+
+        def _fake_statvfs(_path):
+            return _FakeStatVfs(next(free_values))
+
+        def _fake_scan(*args, **kwargs):
+            label = f"snapshot_{len(scan_calls)}"
+            scan_calls.append(label)
+            return {"label": label, "tree": {"dir_bytes": {}}, "extensions": {"ext_bytes": {}}, "totals": {}}
+
+        def _fake_diff(current_snapshot, previous_snapshot):
+            diff_inputs.append((current_snapshot["label"], previous_snapshot["label"]))
+            return {"tree": {"dir_bytes_delta": {}}, "extensions": {"ext_bytes_delta": {}}}
+
+        monkeypatch.setattr("core.space_audit.os.statvfs", _fake_statvfs)
+        monkeypatch.setattr("core.space_audit.scan_space_usage", _fake_scan)
+        monkeypatch.setattr("core.space_audit.diff_space_snapshots", _fake_diff)
+        monkeypatch.setattr(
+            "core.space_audit.calibrate_baseline",
+            lambda *args, **kwargs: {
+                "median_abs_delta": 1,
+                "minor_fluctuation_band_bytes": 1,
+                "significant_drop_threshold_bytes": 1,
+                "critical_drop_threshold_bytes": 1,
+            },
+        )
+        result = sample_free_space_timeline(
+            root=root,
+            output_csv=out_csv,
+            interval_seconds=0.0,
+            max_rows=2,
+            free_space_drop_spike_threshold_bytes=1,
+        )
+        assert result["rows_written"] == 2
+        assert scan_calls == ["snapshot_0", "snapshot_1"]
+        assert diff_inputs == [("snapshot_1", "snapshot_0")]
         assert "remediation" in result
         assert result["remediation"]["safety"] == "Never force-terminate processes automatically."
         assert "signals" in result
