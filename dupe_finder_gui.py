@@ -83,6 +83,8 @@ from dupe_core import (
     fmt_time,
     format_bytes,
     new_run_id,
+    write_live_reports,
+    write_scan_reports,
 )
 from core.models import ScanRequest
 from core.service import (
@@ -247,6 +249,7 @@ class ScanWorker(QObject):
                     compare_mode=True,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
                     checkpoint_path=self.report_dir / "checkpoint_scan.json",
+                )
                 scan_stats = scan_stats_full.get("combined") or {
                     "listed": 0,
                     "indexed": 0,
@@ -332,7 +335,6 @@ class ScanWorker(QObject):
                 except Exception:
                     pass
 
-            dupes = load_dupes(
             dupes = find_duplicates(
                 db_path=db_path,
                 cancel_flag=self._cancel_flag,
