@@ -6,6 +6,8 @@ from core.ai.outcomes_tracker import (
     build_action_outcome_record,
     summarize_case_outcomes,
     update_heuristic_weights,
+    purge_expired_case_reports,
+    EvidenceRetentionConfig,
 )
 
 
@@ -58,3 +60,19 @@ def test_append_outcomes_history_jsonl(tmp_path: Path) -> None:
     lines = target.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     assert '"case_id": "x"' in lines[0]
+
+
+def test_purge_expired_case_reports(tmp_path: Path) -> None:
+    old = tmp_path / "old.json"
+    keep = tmp_path / "keep.json"
+    old.write_text("{}", encoding="utf-8")
+    keep.write_text("{}", encoding="utf-8")
+
+    import os, time
+    old_ts = time.time() - (40 * 86400)
+    os.utime(old, (old_ts, old_ts))
+
+    result = purge_expired_case_reports(tmp_path, config=EvidenceRetentionConfig(keep_days=30))
+    assert result["purged"] == 1
+    assert not old.exists()
+    assert keep.exists()

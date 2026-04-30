@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,35 @@ from core.ai.prompt_security import sanitize_untrusted_text
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+
+
+DEFAULT_REDACTION_POLICY = {
+    "usernames": "hash",
+    "hostnames": "hash",
+    "process_args": "mask",
+    "path_segments": "partial",
+}
+
+
+def _redaction_policy(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    policy = dict(DEFAULT_REDACTION_POLICY)
+    if isinstance(overrides, dict):
+        for key in DEFAULT_REDACTION_POLICY:
+            if key in overrides and overrides[key]:
+                policy[key] = str(overrides[key])
+    return policy
+
+
+def _build_export_tiers(evidence: dict[str, Any], policy: dict[str, str]) -> dict[str, Any]:
+    full_payload = deepcopy(evidence)
+    share_safe = deepcopy(evidence)
+    share_safe["export_tier"] = "share_safe_redacted"
+    share_safe["redaction_policy"] = policy
+    return {
+        "full_forensic_report": {"export_tier": "full_forensic_report", "payload": full_payload},
+        "share_safe_redacted_report": {"export_tier": "share_safe_redacted", "payload": share_safe},
+    }
 
 def _feature(value: dict[str, Any], *, source_file: str, run_id: str, event_id: str, timestamp: str | None = None) -> dict[str, Any]:
     return {
@@ -39,13 +69,18 @@ def build_normalized_evidence(
     policy_context_payload: dict[str, Any],
     user_notes: str | None = None,
     user_context: dict[str, Any] | None = None,
+    redaction_policy: dict[str, str] | None = None,
+    consent_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = str(disk_metrics_payload.get("timestamp") or _utc_now_iso())
+    policy = _redaction_policy(redaction_policy)
     evidence: dict[str, Any] = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
         "event_id": event_id,
         "generated_at": _utc_now_iso(),
+        "redaction_policy": policy,
+        "export_tiers": {},
         "space_audit_snapshot_features": [
             _feature({"metrics": disk_metrics_payload}, source_file="disk_metrics.json", run_id=run_id, event_id=event_id, timestamp=ts),
             _feature({"top_dir_deltas": top_dir_payload.get("rows", [])}, source_file="top_dir_deltas.json", run_id=run_id, event_id=event_id, timestamp=ts),
@@ -63,7 +98,11 @@ def build_normalized_evidence(
         "user_notes_context": [
             _feature({"notes": sanitize_untrusted_text(user_notes), "context": user_context or {}}, source_file="user_context", run_id=run_id, event_id=event_id, timestamp=ts),
         ],
+        "external_model_provider_usage": [
+            _feature({"consent_state": consent_state or {"provider_enabled": False, "consent_captured": False}}, source_file="model_provider_state.json", run_id=run_id, event_id=event_id, timestamp=ts),
+        ],
     }
+    evidence["export_tiers"] = _build_export_tiers(evidence, policy)
     validate_evidence_schema(evidence)
     return evidence
 

@@ -124,3 +124,26 @@ def append_outcomes_history(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+@dataclass
+class EvidenceRetentionConfig:
+    keep_days: int = 30
+    enabled: bool = True
+
+
+def purge_expired_case_reports(base_dir: Path, *, now: datetime | None = None, config: EvidenceRetentionConfig | None = None) -> dict[str, Any]:
+    cfg = config or EvidenceRetentionConfig()
+    ref = now or datetime.now(timezone.utc)
+    purged = 0
+    skipped = 0
+    if not cfg.enabled:
+        return {"purged": 0, "skipped": 0, "enabled": False}
+    for path in base_dir.rglob("*.json"):
+        age_days = (ref - datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)).days
+        if age_days > cfg.keep_days:
+            path.unlink(missing_ok=True)
+            purged += 1
+        else:
+            skipped += 1
+    return {"purged": purged, "skipped": skipped, "enabled": True, "keep_days": cfg.keep_days}
