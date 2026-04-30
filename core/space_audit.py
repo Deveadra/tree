@@ -29,6 +29,43 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _sha_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _redact_path_string(value: str, hash_usernames: bool, hash_filenames: bool) -> str:
+    parts = value.replace("\\", "/").split("/")
+    redacted: list[str] = []
+    for idx, part in enumerate(parts):
+        token = part
+        if hash_usernames and idx > 0 and parts[idx - 1].lower() in {"users", "home"} and part:
+            token = f"user:{_sha_token(part)}"
+        if hash_filenames and idx == len(parts) - 1 and "." in part:
+            token = f"file:{_sha_token(part)}"
+        redacted.append(token)
+    return "/".join(redacted)
+
+
+def _apply_redaction_payload(payload: Any, *, hash_usernames: bool, hash_filenames: bool, hash_process_arguments: bool) -> Any:
+    if isinstance(payload, dict):
+        out: dict[str, Any] = {}
+        for k, v in payload.items():
+            key = str(k).lower()
+            if isinstance(v, str):
+                if hash_process_arguments and key in {"cmdline", "args", "command", "command_line"}:
+                    out[k] = f"args:{_sha_token(v)}"
+                elif key in {"path", "target", "dir", "file", "filename"}:
+                    out[k] = _redact_path_string(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames)
+                else:
+                    out[k] = v
+            else:
+                out[k] = _apply_redaction_payload(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments)
+        return out
+    if isinstance(payload, list):
+        return [_apply_redaction_payload(item, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments) for item in payload]
+    return payload
+
+
 def _is_excluded(path: Path, root: Path, excludes: set[str]) -> bool:
     if not excludes:
         return False
@@ -792,6 +829,10 @@ def sample_free_space_timeline(
     capture_process_file_handles: bool = False,
     enable_local_notifications: bool = False,
     alerts_feed_path: str | Path | None = None,
+    hash_usernames: bool = False,
+    hash_filenames: bool = False,
+    hash_process_arguments: bool = False,
+    local_only_mode: bool = False,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Periodically capture free-space metrics into CSV.
@@ -982,41 +1023,54 @@ def sample_free_space_timeline(
                     key=lambda item: abs(int(item[1])),
                     reverse=True,
                 )[: max(1, int(top_n_deltas))]
-                write_json_atomic(bundle_dir / "disk_metrics.json", {
+                disk_metrics_payload = {
                     "timestamp": _utc_now_iso(),
                     "total_bytes": total,
                     "free_bytes": free,
                     "used_bytes": used,
                     "free_delta_bytes": delta,
                     "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
-                })
-                write_json_atomic(bundle_dir / "top_dir_deltas.json", {"rows": [{"dir": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)} for k, v in top_dir_deltas]})
-                write_json_atomic(bundle_dir / "top_extension_deltas.json", {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]})
-                write_json_atomic(bundle_dir / "process_io_snapshot.json", _collect_io_snapshot())
+                }
+                top_dir_payload = {"rows": [{"dir": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)} for k, v in top_dir_deltas]}
+                top_ext_payload = {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]}
+                process_io_payload = _collect_io_snapshot()
                 deleted_handles = _scan_deleted_open_handles()
-                write_json_atomic(bundle_dir / "process_file_handles.json", deleted_handles)
-                plugin_payload = run_plugins_safely(root_path, plugins=load_collector_plugins())
+                plugin_payload = {"disabled": True, "reason": "local_only_mode"} if local_only_mode else run_plugins_safely(root_path, plugins=load_collector_plugins())
                 plugin_failures += sum(1 for p in plugin_payload.get("plugins", []) if p.get("status") == "failed")
-                write_json_atomic(bundle_dir / "plugin_collectors.json", plugin_payload)
-                write_json_atomic(bundle_dir / "policy_context.json", {
+                policy_context_payload = {
                     "policy_path": str(Path(policy_path).resolve()) if policy_path else str(DEFAULT_TOML),
                     "enforce_safe_delete_roots": bool(protection_cfg.enforce_safe_delete_roots),
                     "safe_delete_roots": list(protection_cfg.safe_delete_roots),
                     "protected_prefixes": list(protection_cfg.protected_prefixes),
                     "protected_dir_names": list(protection_cfg.protected_dir_names),
-                })
+                }
+                full_dir = bundle_dir / "full_detail"
+                safe_dir = bundle_dir / "share_safe"
+                safe_mkdir(full_dir)
+                safe_mkdir(safe_dir)
+                for name, payload in {
+                    "disk_metrics.json": disk_metrics_payload,
+                    "top_dir_deltas.json": top_dir_payload,
+                    "top_extension_deltas.json": top_ext_payload,
+                    "process_io_snapshot.json": process_io_payload,
+                    "process_file_handles.json": deleted_handles,
+                    "plugin_collectors.json": plugin_payload,
+                    "policy_context.json": policy_context_payload,
+                }.items():
+                    write_json_atomic(full_dir / name, payload)
+                    write_json_atomic(
+                        safe_dir / name,
+                        _apply_redaction_payload(payload, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments),
+                    )
                 manifest = {
                     "event_id": event_id,
                     "bundle_dir": str(bundle_dir),
                     "generated_at": _utc_now_iso(),
+                    "local_only_mode": bool(local_only_mode),
+                    "redaction_level": "share_safe_hashed" if (hash_usernames or hash_filenames or hash_process_arguments) else "none",
                     "artifacts": {
-                        "disk_metrics": str(bundle_dir / "disk_metrics.json"),
-                        "top_dir_deltas": str(bundle_dir / "top_dir_deltas.json"),
-                        "top_extension_deltas": str(bundle_dir / "top_extension_deltas.json"),
-                        "process_io_snapshot": str(bundle_dir / "process_io_snapshot.json"),
-                        "process_file_handles": str(bundle_dir / "process_file_handles.json"),
-                        "plugin_collectors": str(bundle_dir / "plugin_collectors.json"),
-                        "policy_context": str(bundle_dir / "policy_context.json"),
+                        "full_detail_dir": str(full_dir),
+                        "share_safe_dir": str(safe_dir),
                     },
                 }
                 write_json_atomic(bundle_dir / "bundle_manifest.json", manifest)
@@ -1060,7 +1114,8 @@ def sample_free_space_timeline(
                     deduped_alerts.append(deduped_event)
                     metadata = {"first_seen": event_ts, "last_seen": event_ts, "count": 1}
                 spikes.append(deduped_event)
-                _append_alert_feed({**deduped_event, "metadata": metadata})
+                if not local_only_mode:
+                    _append_alert_feed({**deduped_event, "metadata": metadata})
                 _notify_local(f"[space-watchdog] {deduped_event['severity']} alert {deduped_event['root_cause_window']} count={deduped_event['count']}")
                 shrink_total = int(diff.get("totals", {}).get("total_shrink_bytes", 0))
                 if shrink_total > 0 and delta <= 0:
