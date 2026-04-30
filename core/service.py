@@ -30,7 +30,14 @@ def scan_to_db(
     min_size: int = 1,
     compare_mode: bool = False,
     scan_error_log_path: Path | None = None,
+    checkpoint_path: Path | None = None,
 ) -> dict[str, Any]:
+    def _never_cancel() -> bool:
+        return False
+
+    def _ignore_metrics(_: dict) -> None:
+        return None
+
     if compare_mode and len(roots) >= 2:
         return scan_roots_to_db(
             db_path=db_path,
@@ -38,7 +45,10 @@ def scan_to_db(
             excludes=excludes,
             follow_symlinks=follow_symlinks,
             min_size=min_size,
+            cancel_flag=_never_cancel,
+            metrics_cb=_ignore_metrics,
             scan_error_log_path=scan_error_log_path,
+            checkpoint_path=checkpoint_path,
         )
     return scan_root_to_db(
         db_path=db_path,
@@ -46,12 +56,21 @@ def scan_to_db(
         excludes=excludes,
         follow_symlinks=follow_symlinks,
         min_size=min_size,
+        cancel_flag=_never_cancel,
+        metrics_cb=_ignore_metrics,
         scan_error_log_path=scan_error_log_path,
+        checkpoint_path=checkpoint_path,
     )
 
 
 def load_dupes(db_path: Path, compare_mode: bool = False) -> list[DupeGroup]:
-    return find_dupes_from_db(db_path, compare_mode=compare_mode)
+    required_roots = (0, 1) if compare_mode else None
+    return find_dupes_from_db(
+        db_path=db_path,
+        cancel_flag=lambda: False,
+        metrics_cb=lambda _: None,
+        required_roots=required_roots,
+    )
 
 
 def serialize_dupes(groups: list[DupeGroup]) -> list[dict[str, Any]]:
@@ -100,12 +119,12 @@ def apply_prune(plan: dict[str, Any], dry_run: bool = True, yes: bool = False, a
         if dry_run:
             results["skipped"] += 1
             continue
-        ok = windows_recycle(p)
-        if ok:
+        try:
+            windows_recycle([str(p)])
             results["applied"] += 1
             if audit_log:
                 append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "ok"})
-        else:
+        except Exception:
             results["errors"] += 1
             if audit_log:
                 append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "error"})
@@ -114,8 +133,8 @@ def apply_prune(plan: dict[str, Any], dry_run: bool = True, yes: bool = False, a
 
 def write_reports(report_dir: Path, groups: list[DupeGroup], scan_stats: dict[str, Any], excludes: set[str]) -> None:
     safe_mkdir(report_dir)
-    write_scan_reports(report_dir=report_dir, dupes=groups, scan_stats=scan_stats, excludes=excludes)
-    write_live_reports(report_dir=report_dir, dupes=groups, scan_stats=scan_stats)
+    write_scan_reports(report_dir=report_dir, dupes=groups)
+    write_live_reports(report_dir=report_dir, dupes=groups)
     suggestions = analyze_path_prefixes(groups)
     write_path_suggestions(report_dir, suggestions)
 
