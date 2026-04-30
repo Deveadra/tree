@@ -15,6 +15,7 @@ class PruneFlowsIntegrationTests(unittest.TestCase):
                 "plan_version": service.PRUNE_PLAN_SCHEMA_VERSION,
                 "generated_at": "2026-01-01T00:00:00Z",
                 "source_id": "test",
+                "policy_firewall": {"violations": [], "rewritten": []},
             },
             "groups": 1,
             "actions": [
@@ -114,6 +115,32 @@ class PruneFlowsIntegrationTests(unittest.TestCase):
             self.assertTrue(blocked.exists())
             report = json.loads((root / "audit" / "policy_block_report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["blocked_total"], 1)
+
+    def test_cli_apply_prune_bypass_missing_metadata_is_denied(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "safe.txt"
+            target.write_text("x", encoding="utf-8")
+            plan = self._build_plan(target)
+            del plan["metadata"]["policy_firewall"]
+            plan["plan_checksum"] = service._sha256_json(plan)
+
+            with self.assertRaises(ValueError):
+                service.apply_prune(plan, dry_run=False, yes=True, audit_log=root / "audit")
+            self.assertTrue(target.exists())
+
+    def test_universal_denial_on_uncertain_policy_decision(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            blocked_file = root / "blocked.txt"
+            blocked_file.write_text("x", encoding="utf-8")
+            plan = self._build_plan(blocked_file)
+            plan["plan_checksum"] = service._sha256_json(plan)
+
+            with patch("core.service.evaluate_delete_permission", return_value={"reason": "indeterminate"}):
+                with self.assertRaises(ValueError):
+                    service.apply_prune(plan, dry_run=False, yes=True, audit_log=root / "audit")
+            self.assertTrue(blocked_file.exists())
 
 
 if __name__ == "__main__":
