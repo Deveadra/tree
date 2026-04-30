@@ -17,9 +17,12 @@ def _normalize_path(path: str) -> str:
 
 
 def _is_same_or_child(path: str, prefix: str) -> bool:
-    if prefix.endswith(os.sep):
+    path = path.replace("/", "\\")
+    prefix = prefix.replace("/", "\\")
+    sep = "\\"
+    if prefix.endswith(sep):
         return path.startswith(prefix)
-    return path == prefix or path.startswith(prefix + os.sep)
+    return path == prefix or path.startswith(prefix + sep)
 
 
 def is_under_protected_prefix(path: str, protected_prefixes: Optional[list[str]] = None) -> Optional[str]:
@@ -34,10 +37,7 @@ def is_under_protected_prefix(path: str, protected_prefixes: Optional[list[str]]
 
 def contains_protected_dir_name(path: str, protected_dir_names: Optional[list[str]] = None) -> Optional[str]:
     np = _normalize_path(path)
-    try:
-        parts = Path(np).parts
-    except Exception:
-        parts = re.split(r"[\\/]+", np)
+    parts = re.split(r"[\\/]+", np)
 
     protected_names = set(protected_dir_names) if protected_dir_names is not None else {"windows", "program files", "program files (x86)", "programdata", "$recycle.bin", "system volume information"}
     for part in parts:
