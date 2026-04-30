@@ -594,6 +594,85 @@ def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
     }
 
 
+ALLOWED_BOOKMARKS = {"pre-cleanup", "post-cleanup", "relapse detected"}
+
+
+def create_replay_bookmark(
+    bookmark_dir: str | Path,
+    label: str,
+    snapshot: dict[str, Any],
+    evidence_bundle: dict[str, Any] | None = None,
+    suspect_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = str(label).strip().lower()
+    if normalized not in ALLOWED_BOOKMARKS:
+        raise ValueError(f"Unsupported bookmark label: {label}")
+    out_dir = Path(bookmark_dir)
+    safe_mkdir(out_dir)
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "bookmark": normalized,
+        "created_at": _utc_now_iso(),
+        "snapshot": snapshot,
+    }
+    if evidence_bundle is not None:
+        payload["evidence_bundle"] = evidence_bundle
+    if suspect_report is not None:
+        payload["suspect_attribution"] = suspect_report
+    out_path = out_dir / f"bookmark_{normalized.replace(' ', '_').replace('-', '_')}.json"
+    write_json_atomic(out_path, payload)
+    return payload
+
+
+def build_replay_diff_view(
+    from_bookmark: dict[str, Any],
+    to_bookmark: dict[str, Any],
+    top_n_regrowth_sources: int = 10,
+    policy_path: str | Path | None = None,
+) -> dict[str, Any]:
+    from_snapshot = from_bookmark.get("snapshot", {})
+    to_snapshot = to_bookmark.get("snapshot", {})
+    diff = diff_space_snapshots(to_snapshot, from_snapshot, policy_path=policy_path)
+    growth = diff.get("tree", {}).get("ranked_growth", [])[: max(1, int(top_n_regrowth_sources))]
+    replay_entries: list[dict[str, Any]] = []
+    for row in growth:
+        replay_entries.append(
+            {
+                "path": row.get("path"),
+                "delta_bytes": int(row.get("delta_bytes", 0)),
+                "zone_tag": row.get("zone_tag"),
+                "evidence_bundle": to_bookmark.get("evidence_bundle", {}),
+                "suspect_attribution": to_bookmark.get("suspect_attribution", {}),
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "from_bookmark": from_bookmark.get("bookmark"),
+        "to_bookmark": to_bookmark.get("bookmark"),
+        "totals": diff.get("totals", {}),
+        "top_regrowth_sources": replay_entries,
+        "diff": diff,
+    }
+
+
+def export_incident_summary(report_dir: str | Path, replay_view: dict[str, Any]) -> Path:
+    out_dir = Path(report_dir)
+    safe_mkdir(out_dir)
+    path = out_dir / "incident_summary.json"
+    write_json_atomic(path, {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "incident": {
+            "from_bookmark": replay_view.get("from_bookmark"),
+            "to_bookmark": replay_view.get("to_bookmark"),
+            "net_change_bytes": replay_view.get("totals", {}).get("net_change_bytes", 0),
+            "top_regrowth_sources": replay_view.get("top_regrowth_sources", []),
+        },
+    })
+    return path
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "scan_space_usage",
