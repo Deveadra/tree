@@ -708,6 +708,8 @@ def sample_free_space_timeline(
     retention_max_disk_bytes: int | None = None,
     top_n_deltas: int = 20,
     capture_process_file_handles: bool = False,
+    enable_local_notifications: bool = False,
+    alerts_feed_path: str | Path | None = None,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Periodically capture free-space metrics into CSV.
@@ -737,6 +739,8 @@ def sample_free_space_timeline(
     rows_written = 0
     previous_free: int | None = None
     spikes: list[dict[str, Any]] = []
+    deduped_alerts: list[dict[str, Any]] = []
+    alert_windows: dict[str, dict[str, Any]] = {}
     evidence_bundles: list[dict[str, Any]] = []
     non_recovery_events: list[dict[str, Any]] = []
     probable_deleted_open_events: list[dict[str, Any]] = []
@@ -744,6 +748,20 @@ def sample_free_space_timeline(
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
     attribution_reports: list[str] = []
+    alerts_feed_file = Path(alerts_feed_path) if alerts_feed_path is not None else (out_path.parent / "alerts.jsonl")
+
+    def _notify_local(message: str) -> None:
+        if not enable_local_notifications:
+            return
+        try:
+            print(f"\a{message}")
+        except Exception:
+            pass
+
+    def _append_alert_feed(row: dict[str, Any]) -> None:
+        safe_mkdir(alerts_feed_file.parent)
+        with alerts_feed_file.open("a", encoding="utf-8") as feed:
+            feed.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _collect_io_snapshot() -> dict[str, Any]:
         if not capture_active_process_io:
@@ -917,23 +935,46 @@ def sample_free_space_timeline(
                 write_json_atomic(bundle_dir / "bundle_manifest.json", manifest)
                 evidence_bundles.append(manifest)
                 _prune_bundles()
-                severity = "critical" if abs(delta) >= critical_drop else "significant"
-                spikes.append(
-                    {
-                        "event_id": f"spike-{len(spikes) + 1}",
-                        "timestamp": _utc_now_iso(),
+                severity = "critical" if abs(delta) >= critical_drop else "warning"
+                event_ts = _utc_now_iso()
+                root_cause_hint = top_dir_deltas[0][0] if top_dir_deltas else "unknown"
+                cause_window_id = f"{root_cause_hint}|{threshold}"
+                if cause_window_id in alert_windows:
+                    existing = alert_windows[cause_window_id]
+                    existing["last_seen"] = event_ts
+                    existing["count"] = int(existing["count"]) + 1
+                    if existing["severity"] != "critical":
+                        if severity == "critical" or int(existing["count"]) >= 3:
+                            existing["severity"] = "critical" if severity == "critical" else "warning"
+                        elif int(existing["count"]) >= 2:
+                            existing["severity"] = "warning"
+                    metadata = {"first_seen": existing["first_seen"], "last_seen": existing["last_seen"], "count": existing["count"]}
+                    deduped_event = existing
+                else:
+                    deduped_event = {
+                        "event_id": f"alert-{len(deduped_alerts) + 1}",
+                        "timestamp": event_ts,
                         "free_delta_bytes": delta,
                         "free_bytes": free,
                         "threshold_bytes": threshold,
-                        "severity": severity,
+                        "severity": "info" if abs(delta) < significant_drop else severity,
+                        "root_cause_window": cause_window_id,
                         "warning_banner": "WARNING: Protected-zone growth spike detected. Use safe alternatives; avoid direct deletions." if any(classify_zone(k, protection_cfg) == "protected zone" and int(v) > 0 for k, v in top_dir_deltas) else "",
                         "safer_alternatives": [
                             "Review application-level cache settings and clear cache from app preferences.",
                             "Use retention limits (logs/backups/media history) instead of ad-hoc file deletions.",
                             "Prefer OS storage cleanup utilities and documented cache paths for your platform.",
                         ],
+                        "first_seen": event_ts,
+                        "last_seen": event_ts,
+                        "count": 1,
                     }
-                )
+                    alert_windows[cause_window_id] = deduped_event
+                    deduped_alerts.append(deduped_event)
+                    metadata = {"first_seen": event_ts, "last_seen": event_ts, "count": 1}
+                spikes.append(deduped_event)
+                _append_alert_feed({**deduped_event, "metadata": metadata})
+                _notify_local(f"[space-watchdog] {deduped_event['severity']} alert {deduped_event['root_cause_window']} count={deduped_event['count']}")
                 shrink_total = int(diff.get("totals", {}).get("total_shrink_bytes", 0))
                 if shrink_total > 0 and delta <= 0:
                     non_recovery_events.append({
@@ -979,6 +1020,8 @@ def sample_free_space_timeline(
         "duration_seconds": float(time.monotonic() - started_at),
         "spike_count": len(spikes),
         "spikes": spikes,
+        "alerts": deduped_alerts,
+        "alerts_feed_path": str(alerts_feed_file),
         "baseline_profile": profile,
         "baseline_profile_path": str(baseline_path),
         "mode": "watchdog_read_only",

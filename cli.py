@@ -63,6 +63,8 @@ def _parser() -> argparse.ArgumentParser:
     w.add_argument("--duration", type=float, default=None)
     w.add_argument("--max-rows", type=int, default=None)
     w.add_argument("--spike-threshold-bytes", type=int, default=None)
+    w.add_argument("--local-notifications", action="store_true")
+    w.add_argument("--alerts-feed", default=None)
     w.add_argument("--json", action="store_true", dest="as_json")
 
     sa = sub.add_parser("space-audit", help="Run read-only disk usage audit and write reports")
@@ -155,6 +157,8 @@ def main() -> int:
                 duration_seconds=args.duration,
                 max_rows=args.max_rows,
                 spike_threshold_bytes=args.spike_threshold_bytes,
+                enable_local_notifications=args.local_notifications,
+                alerts_feed_path=Path(args.alerts_feed) if args.alerts_feed else None,
                 cancel_flag=None,
             )
         except KeyboardInterrupt:

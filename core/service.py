@@ -119,6 +119,8 @@ def run_free_space_watchdog(
     duration_seconds: float | None,
     max_rows: int | None,
     spike_threshold_bytes: int | None,
+    enable_local_notifications: bool = False,
+    alerts_feed_path: Path | None = None,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +131,8 @@ def run_free_space_watchdog(
         duration_seconds=duration_seconds,
         max_rows=max_rows,
         free_space_drop_spike_threshold_bytes=spike_threshold_bytes,
+        enable_local_notifications=enable_local_notifications,
+        alerts_feed_path=alerts_feed_path,
         cancel_flag=cancel_flag,
     )
 

@@ -1,6 +1,8 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from core.space_audit import sample_correlated_space_timeline, sample_free_space_timeline
 
@@ -125,3 +127,53 @@ def test_correlated_watchdog_writes_both_streams_and_event_ids():
         assert fast_lines[0].startswith("event_id,stream,timestamp,total_bytes")
         assert growth_lines[0].startswith("event_id,stream,timestamp,tree_bytes_delta,top_dir_growth_path,top_dir_growth_zone")
         assert result["mode"] == "watchdog_correlated_read_only"
+
+
+def test_alerts_are_deduplicated_with_metadata_and_jsonl_feed():
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_csv = root / "free_space_timeline.csv"
+        alerts_feed = root / "alerts.jsonl"
+        stats = [
+            SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=900),
+            SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=880),
+            SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=860),
+            SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=840),
+        ]
+        idx = {"i": 0}
+
+        def _fake_statvfs(_path):
+            i = idx["i"]
+            if i < len(stats):
+                idx["i"] += 1
+                return stats[i]
+            return stats[-1]
+
+        with patch("core.space_audit.os.statvfs", side_effect=_fake_statvfs), patch(
+            "core.space_audit.calibrate_baseline",
+            return_value={
+                "minor_fluctuation_band_bytes": 1,
+                "significant_drop_threshold_bytes": 5,
+                "critical_drop_threshold_bytes": 15,
+            },
+        ), patch(
+            "core.space_audit.scan_space_usage",
+            return_value={"tree": {"dir_bytes": {}}, "extensions": {"ext_bytes": {}}, "totals": {"total_size_bytes": 0}},
+        ), patch(
+            "core.space_audit.diff_space_snapshots",
+            return_value={"tree": {"dir_bytes_delta": {"/same/root/cause": 100}}, "extensions": {"ext_bytes_delta": {".tmp": 100}}, "totals": {"total_shrink_bytes": 0}},
+        ):
+            result = sample_free_space_timeline(
+                root=root,
+                output_csv=out_csv,
+                interval_seconds=0.0,
+                max_rows=4,
+                free_space_drop_spike_threshold_bytes=1,
+                alerts_feed_path=alerts_feed,
+            )
+        assert len(result["alerts"]) == 1
+        alert = result["alerts"][0]
+        assert alert["count"] == 3
+        assert "first_seen" in alert and "last_seen" in alert
+        lines = alerts_feed.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 3
