@@ -7,6 +7,9 @@ from typing import Any, Callable
 import errno
 import os
 
+from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
+from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix
+
 from dupe_core import safe_mkdir, write_json_atomic
 
 SCHEMA_VERSION = "1.1"
@@ -37,6 +40,16 @@ def _extension_for(path: Path) -> str:
     return ext if ext else "[no_ext]"
 
 
+def _is_protected(path: Path, policy: ProtectionConfig) -> tuple[bool, str | None, str | None]:
+    pref = is_under_protected_prefix(str(path), protected_prefixes=policy.protected_prefixes)
+    if pref:
+        return True, "protected_prefix", pref
+    name = contains_protected_dir_name(str(path), protected_dir_names=policy.protected_dir_names)
+    if name:
+        return True, "protected_dir_name", str(name)
+    return False, None, None
+
+
 def scan_space_usage(
     root: str | Path,
     excludes: list[str] | set[str],
@@ -44,11 +57,14 @@ def scan_space_usage(
     policy: Callable[[Path, os.stat_result], bool] | None = None,
     cancel_flag: Any | None = None,
     metrics_cb: Callable[[dict[str, Any]], None] | None = None,
+    policy_path: str | Path | None = None,
+    audit_mode: bool = True,
 ) -> dict[str, Any]:
     """Read-only filesystem scan that records file usage by tree node and extension."""
     root_path = Path(root).expanduser().resolve()
     exclude_set = {str(item) for item in excludes}
     start = _utc_now_iso()
+    protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
 
     volume_total = 0
     volume_free = 0
@@ -87,6 +103,7 @@ def scan_space_usage(
     ext_totals_allocated: Counter[str] = Counter()
     file_count = 0
     skipped_count = 0
+    skipped_protected: list[dict[str, str]] = []
     errors: list[dict[str, Any]] = []
 
     def record_error(path: str, exc: BaseException) -> None:
@@ -105,8 +122,29 @@ def scan_space_usage(
             break
 
         current_dir = Path(dirpath)
-        dirnames[:] = [d for d in dirnames if not _is_excluded(current_dir / d, root_path, exclude_set)]
+        pruned_dirnames: list[str] = []
+        for d in dirnames:
+            candidate = current_dir / d
+            if _is_excluded(candidate, root_path, exclude_set):
+                continue
+            is_protected, reason_code, reason_detail = _is_protected(candidate, protection_cfg)
+            if is_protected:
+                skipped_count += 1
+                skipped_protected.append(
+                    {"path": str(candidate), "reason_code": str(reason_code), "reason": str(reason_detail)}
+                )
+                continue
+            pruned_dirnames.append(d)
+        dirnames[:] = pruned_dirnames
         if _is_excluded(current_dir, root_path, exclude_set):
+            continue
+
+        current_is_protected, reason_code, reason_detail = _is_protected(current_dir, protection_cfg)
+        if current_is_protected:
+            skipped_count += 1
+            skipped_protected.append(
+                {"path": str(current_dir), "reason_code": str(reason_code), "reason": str(reason_detail)}
+            )
             continue
 
         for filename in filenames:
@@ -116,6 +154,13 @@ def scan_space_usage(
             file_path = current_dir / filename
             if _is_excluded(file_path, root_path, exclude_set):
                 skipped_count += 1
+                continue
+            file_is_protected, reason_code, reason_detail = _is_protected(file_path, protection_cfg)
+            if file_is_protected:
+                skipped_count += 1
+                skipped_protected.append(
+                    {"path": str(file_path), "reason_code": str(reason_code), "reason": str(reason_detail)}
+                )
                 continue
 
             try:
@@ -180,6 +225,7 @@ def scan_space_usage(
             "root": str(root_path),
             "depth": depth,
             "cancelled": bool(cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)()),
+            "audit_mode": bool(audit_mode),
         },
         "totals": {
             "volume_total_bytes": int(volume_total),
@@ -205,13 +251,29 @@ def scan_space_usage(
         "tree": {"dir_bytes": dict(dir_totals), "dir_allocated_bytes": dict(dir_totals_allocated)},
         "extensions": {"ext_bytes": dict(ext_totals), "ext_allocated_bytes": dict(ext_totals_allocated)},
         "errors": errors,
+        "protection": {
+            "policy_path": str(Path(policy_path).resolve()) if policy_path else str(DEFAULT_TOML),
+            "invariant": {
+                "traversal": "strict",
+                "recommendations": "advisory",
+                "note": "Policy checks are advisory for recommendations, strict for traversal skip behavior as configured.",
+            },
+            "skipped_regions": skipped_protected,
+        },
     }
 
 
 def summarize_top_dirs(snapshot: dict[str, Any], top_n: int = 100) -> list[dict[str, Any]]:
     dir_bytes = snapshot.get("tree", {}).get("dir_bytes", {})
     rows = sorted(dir_bytes.items(), key=lambda pair: pair[1], reverse=True)
-    return [{"path": path, "bytes": int(total)} for path, total in rows[:top_n]]
+    protected_paths = {item.get("path") for item in snapshot.get("protection", {}).get("skipped_regions", [])}
+    out: list[dict[str, Any]] = []
+    for path, total in rows[:top_n]:
+        row = {"path": path, "bytes": int(total)}
+        if path in protected_paths:
+            row["warning"] = "Protected region: do not perform direct action without explicit override and validation."
+        out.append(row)
+    return out
 
 
 def summarize_by_extension(snapshot: dict[str, Any], top_n: int = 100) -> list[dict[str, Any]]:
