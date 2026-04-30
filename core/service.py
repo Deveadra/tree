@@ -118,3 +118,28 @@ def write_reports(report_dir: Path, groups: list[DupeGroup], scan_stats: dict[st
     write_live_reports(report_dir=report_dir, dupes=groups, scan_stats=scan_stats)
     suggestions = analyze_path_prefixes(groups)
     write_path_suggestions(report_dir, suggestions)
+
+
+def scan(request: ScanRequest) -> dict:
+    return _scan(request)
+
+
+def find_duplicates(
+    db_path: Path,
+    cancel_flag: Callable[[], bool],
+    metrics_cb: Callable[[dict], None],
+    compare_mode: bool = False,
+    error_log_path: Optional[Path] = None,
+    required_roots: Optional[tuple[int, int]] = None,
+) -> list[DuplicateResultGroup]:
+    return _find_duplicates(
+        db_path=db_path,
+        cancel_flag=cancel_flag,
+        metrics_cb=metrics_cb,
+        compare_mode=compare_mode,
+        error_log_path=error_log_path,
+        required_roots=required_roots,
+    )
+
+
+__all__ = ["scan", "find_duplicates", "build_prune_plan", "execute_prune_plan"]

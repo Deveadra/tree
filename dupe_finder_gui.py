@@ -10,6 +10,7 @@ import subprocess
 import sqlite3
 import sys
 import tkinter as tk
+import uuid
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 import traceback
@@ -70,16 +71,36 @@ from core.service import (
 )
 from dupe_core import (
     append_prune_event,
+    analyze_path_prefixes,
     compile_excludes,
     DEFAULT_EXCLUDES,
+    PROTECTED_PATH_DENYLIST,
     DupeGroup,
     FileRec,
+    find_dupes_from_db,
+    detect_elevated_privileges,
     fmt_duration,
     fmt_time,
     format_bytes,
+    new_run_id,
+)
+from core.models import ScanRequest
+from core.service import (
+    build_prune_plan,
+    execute_prune_plan,
+    find_duplicates,
+    scan,
+)
+from core.reports import (
+    append_prune_event,
     safe_mkdir,
     write_json_atomic,
     windows_recycle,
+    write_live_reports,
+    write_scan_reports,
+    write_path_suggestions,
+    write_run_summary,
+    write_versioned_meta,
 )
 
 
@@ -127,12 +148,46 @@ class ScanWorker(QObject):
         self.follow_symlinks = follow_symlinks
         self.min_size = min_size
         self._cancel = False
+        self._cancel_reason = ""
+        self.run_id = self.report_dir.name
 
-    def cancel(self) -> None:
+    def cancel(self, reason: str = "user_requested") -> None:
         self._cancel = True
+        self._cancel_reason = reason
 
     def _cancel_flag(self) -> bool:
         return self._cancel
+
+    def _persist_run_state(self, db_path: Path, state: str, reason: Optional[str] = None) -> None:
+        try:
+            con = sqlite3.connect(str(db_path))
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS run_state (
+                        run_id TEXT PRIMARY KEY,
+                        state TEXT NOT NULL,
+                        reason TEXT,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                con.execute(
+                    """
+                    INSERT INTO run_state(run_id,state,reason,updated_at)
+                    VALUES(?,?,?,?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                      state=excluded.state,
+                      reason=excluded.reason,
+                      updated_at=excluded.updated_at
+                    """,
+                    (self.run_id, state, reason, time.strftime("%Y-%m-%d %H:%M:%S")),
+                )
+                con.commit()
+            finally:
+                con.close()
+        except Exception:
+            pass
 
     @Slot()
     def run(self) -> None:
@@ -143,6 +198,7 @@ class ScanWorker(QObject):
 
             meta_path = self.report_dir / "run_meta.json"
             meta: dict = {
+                "run_id": self.run_id,
                 "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "roots": [str(r) for r in self.roots],
                 "compare_mode": bool(self.compare_mode),
@@ -155,12 +211,20 @@ class ScanWorker(QObject):
                 "dupe_groups": None,
                 "finished_at": None,
                 "elapsed_s": None,
-                "status": "started",
+                "status": "created",
+                "cancel_reason": None,
             }
+            try:
+                write_versioned_meta(meta_path, meta)
+            except Exception:
+                pass
+            self._persist_run_state(db_path, "created")
+            meta["status"] = "scanning"
             try:
                 write_json_atomic(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "scanning")
 
             def push(m: dict) -> None:
                 self.metrics.emit(m)
@@ -182,7 +246,7 @@ class ScanWorker(QObject):
                     min_size=self.min_size,
                     compare_mode=True,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
-                )
+                    checkpoint_path=self.report_dir / "checkpoint_scan.json",
                 scan_stats = scan_stats_full.get("combined") or {
                     "listed": 0,
                     "indexed": 0,
@@ -199,6 +263,7 @@ class ScanWorker(QObject):
                     min_size=self.min_size,
                     compare_mode=False,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
+                    checkpoint_path=self.report_dir / "checkpoint_scan.json",
                 )
 
             # Count how many size-groups will be hashed
@@ -216,17 +281,26 @@ class ScanWorker(QObject):
 
             meta["scan_stats"] = scan_stats
             meta["size_groups_total"] = size_groups_total
-            meta["status"] = "scanned"
+            meta["status"] = "indexed"
             try:
-                write_json_atomic(meta_path, meta)
+                write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "indexed")
 
             if self._cancel_flag():
+                meta["status"] = "cancelled"
+                meta["cancel_reason"] = self._cancel_reason or "cancelled_during_scan"
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "cancelled", meta["cancel_reason"])
                 self.status.emit("Cancelled during scan.")
                 self.finished.emit([])
                 return
 
+            meta["status"] = "planned"
+            write_json_atomic(meta_path, meta)
+            self._persist_run_state(db_path, "planned")
             self.status.emit("Finding duplicates (size + SHA-256)...")
 
             try:
@@ -259,6 +333,7 @@ class ScanWorker(QObject):
                     pass
 
             dupes = load_dupes(
+            dupes = find_duplicates(
                 db_path=db_path,
                 cancel_flag=self._cancel_flag,
                 metrics_cb=push,
@@ -266,16 +341,23 @@ class ScanWorker(QObject):
                 required_roots=(
                     (0, 1) if (self.compare_mode and len(self.roots) >= 2) else None
                 ),
+                checkpoint_path=self.report_dir / "checkpoint_hash.json",
             )
 
             meta["dupe_groups"] = len(dupes)
-            meta["status"] = "hashed"
+            meta["status"] = "applying"
             try:
-                write_json_atomic(meta_path, meta)
+                write_versioned_meta(meta_path, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "applying")
 
             if self._cancel_flag():
+                meta["status"] = "cancelled"
+                meta["cancel_reason"] = self._cancel_reason or "cancelled_during_hash"
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "cancelled", meta["cancel_reason"])
                 self.status.emit("Cancelled during hashing.")
                 self.finished.emit([])
                 return
@@ -290,11 +372,13 @@ class ScanWorker(QObject):
 
             meta["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             meta["elapsed_s"] = float(time.time() - t0)
-            meta["status"] = "done"
+            meta["status"] = "completed"
             try:
                 write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
             except Exception:
                 pass
+            self._persist_run_state(db_path, "completed")
 
             elapsed = time.time() - t0
             self.status.emit(
@@ -304,6 +388,14 @@ class ScanWorker(QObject):
             self.finished.emit(dupes)
 
         except Exception as e:
+            try:
+                meta["status"] = "failed"
+                meta["error"] = str(e)
+                write_json_atomic(meta_path, meta)
+                write_run_summary(self.report_dir, meta)
+                self._persist_run_state(db_path, "failed", str(e))
+            except Exception:
+                pass
             self.error.emit(str(e))
 
 
@@ -549,6 +641,7 @@ class MainWindow(QMainWindow):
         )
 
         self.report_dir: Path = self.reports_root
+        self.session_id: str = str(uuid.uuid4())
         self.current_digest: Optional[str] = None
 
         self.load_btn = QPushButton("Load previous scan…")
@@ -632,7 +725,12 @@ class MainWindow(QMainWindow):
 
         self.delete_mode = QComboBox()
         self.delete_mode.addItems(
-            ["Recycle Bin (recommended)", "Move to trash folder", "Permanent delete"]
+            [
+                "Recycle Bin (recommended)",
+                "Move to trash folder",
+                "Quarantine (move + manifest)",
+                "Permanent delete",
+            ]
         )
         self.prefer_path_edit = QLineEdit()
         self.prefer_path_edit.setPlaceholderText(
@@ -815,6 +913,7 @@ class MainWindow(QMainWindow):
         # Cache for compiled excludes (used by deletion safety checks)
         self._ex_cache_raw: Optional[str] = None
         self._ex_cache: tuple[set[str], list[str]] = (set(), [])
+        self.allowed_roots: list[Path] = []
 
     # ----------------------------
     # UI helpers
@@ -869,10 +968,11 @@ class MainWindow(QMainWindow):
             return tag[:40] if tag else "scan"
 
         stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        run_id = new_run_id()[:12]
         tag = scan_root.name or scan_root.drive or "scan"
         tag = safe_tag(tag)
 
-        base = f"{stamp}_{tag}"
+        base = f"{stamp}_{tag}_{run_id}"
         run_dir = reports_root / base
 
         n = 1
@@ -1001,7 +1101,7 @@ class MainWindow(QMainWindow):
 
     def on_delete_mode_changed(self) -> None:
         mode = self.delete_mode.currentText()
-        enable_trash = "Move to trash folder" in mode
+        enable_trash = ("Move to trash folder" in mode) or ("Quarantine" in mode)
         self.trash_folder_edit.setEnabled(enable_trash)
         self.trash_folder_btn.setEnabled(enable_trash)
 
@@ -1084,6 +1184,22 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _is_under_any_root(self, path: Path) -> bool:
+        rp = path.resolve()
+        for root in self.allowed_roots:
+            rr = root.resolve()
+            if rp == rr or rr in rp.parents:
+                return True
+        return False
+
+    def _matches_protected_denylist(self, path: str) -> Optional[str]:
+        ps = os.path.normcase(os.path.normpath(os.path.expandvars(path)))
+        for pref in PROTECTED_PATH_DENYLIST:
+            n = os.path.normcase(os.path.normpath(os.path.expandvars(pref)))
+            if ps == n or ps.startswith(n + os.sep):
+                return n
+        return None
+
     # ----------------------------
     # Scan control
     # ----------------------------
@@ -1121,6 +1237,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             roots.append(root_b)
+        self.allowed_roots = list(roots)
 
         reports_root = self._reports_root_dir()
         self.reports_root = reports_root
@@ -1142,6 +1259,13 @@ class MainWindow(QMainWindow):
 
         min_size = int(self.min_size_spin.value())
         follow = bool(self.follow_symlinks_chk.isChecked())
+        if detect_elevated_privileges() and follow:
+            QMessageBox.warning(
+                self,
+                "Risky mode blocked",
+                "Following symlinks/junctions while elevated is blocked unless explicit unsafe mode is enabled.",
+            )
+            return
 
         self.clear_results()
         self.start_btn.setEnabled(False)
@@ -1171,7 +1295,7 @@ class MainWindow(QMainWindow):
 
     def cancel_scan(self) -> None:
         if self.worker:
-            self.worker.cancel()
+            self.worker.cancel("user_cancelled")
             self.set_status("Cancel requested…")
 
     @Slot(int, int)
@@ -1501,7 +1625,9 @@ class MainWindow(QMainWindow):
         failed: list[tuple[str, str]] = []
 
         def try_recycle(p: str) -> None:
-            windows_recycle([p])
+            result = execute_prune_plan(build_prune_plan([p], mode="recycle"))
+            if result.failed:
+                raise RuntimeError(result.errors[0])
 
         def try_move_to_trash(p: str, td: Path) -> None:
             src = Path(p)
@@ -1525,16 +1651,49 @@ class MainWindow(QMainWindow):
 
             dst = td / f"{src.name}.{time.time_ns()}"
             shutil.move(str(src), str(dst))
+            return str(dst)
 
         for p in delete_paths:
             try:
+                p_obj = Path(p)
+                if not self._is_under_any_root(p_obj):
+                    failed.append((p, "Path is outside selected scan roots"))
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(
+                            self.session_id, "delete", p, "blocked", "outside_allowed_roots"
+                        ),
+                    )
+                    continue
+
+                deny = self._matches_protected_denylist(p)
+                if deny:
+                    failed.append((p, f"Protected denylist path: {deny}"))
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(
+                            self.session_id, "delete", p, "blocked", f"protected_path:{deny}"
+                        ),
+                    )
+                    continue
+
                 hit = self._excluded_component_in_path(p)
                 if hit:
                     failed.append((p, f"PROTECTED: path matches exclude '{hit}'"))
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(
+                            self.session_id, "delete", p, "blocked", f"user_exclude:{hit}"
+                        ),
+                    )
                     continue
 
                 if not os.path.exists(p):
                     removed.append(p)
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(self.session_id, "delete", p, "noop_missing"),
+                    )
                     continue
 
                 if "Recycle Bin" in mode:
@@ -1543,6 +1702,19 @@ class MainWindow(QMainWindow):
                     if trash_dir is None:
                         raise RuntimeError("Trash directory not set.")
                     try_move_to_trash(p, trash_dir)
+                elif "Quarantine" in mode:
+                    if trash_dir is None:
+                        raise RuntimeError("Quarantine directory not set.")
+                    qdir = trash_dir / "_quarantine"
+                    dst = try_move_to_trash(p, qdir)
+                    manifest = {
+                        "source_path": p,
+                        "quarantine_path": dst,
+                        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "session": self.session_id,
+                        "mode": "quarantine",
+                    }
+                    append_prune_event(self.report_dir, {"quarantine_manifest": manifest})
                 else:
                     os.remove(p)
 
@@ -1550,9 +1722,19 @@ class MainWindow(QMainWindow):
                     failed.append((p, "File still exists after operation"))
                 else:
                     removed.append(p)
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(self.session_id, "delete", p, "success"),
+                    )
 
             except Exception as e:
                 failed.append((p, f"{type(e).__name__}: {e}"))
+                append_prune_event(
+                    self.report_dir,
+                    make_audit_event(
+                        self.session_id, "delete", p, "error", f"{type(e).__name__}: {e}"
+                    ),
+                )
 
         return removed, failed
 
@@ -1604,3 +1786,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    make_audit_event,
