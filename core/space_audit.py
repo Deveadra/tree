@@ -589,8 +589,96 @@ __all__ = [
     "diff_space_snapshots",
     "write_space_reports",
     "sample_free_space_timeline",
+    "attribute_growth",
     "sample_correlated_space_timeline",
 ]
+
+
+APP_SIGNATURE_RULES: list[dict[str, str]] = [
+    {"app": "sync_client", "pattern": "onedrive"},
+    {"app": "sync_client", "pattern": "dropbox"},
+    {"app": "sync_client", "pattern": "google drive"},
+    {"app": "browser", "pattern": "chrome"},
+    {"app": "browser", "pattern": "firefox"},
+    {"app": "browser", "pattern": "safari"},
+    {"app": "browser", "pattern": "edge"},
+    {"app": "package_manager", "pattern": "npm"},
+    {"app": "package_manager", "pattern": "yarn"},
+    {"app": "package_manager", "pattern": "pip"},
+    {"app": "package_manager", "pattern": "conda"},
+    {"app": "render_cache", "pattern": "cache"},
+    {"app": "render_cache", "pattern": "shader"},
+    {"app": "render_cache", "pattern": "thumbnails"},
+]
+
+
+def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
+    """Correlate growth signals and emit ranked writer/suspect attribution."""
+    suspects: dict[str, dict[str, Any]] = {}
+
+    def _touch(name: str) -> dict[str, Any]:
+        if name not in suspects:
+            suspects[name] = {
+                "name": name,
+                "score": 0.0,
+                "observation": "inferred_suspect",
+                "evidence": [],
+            }
+        return suspects[name]
+
+    for row in event_window.get("directory_growth_windows", []) or []:
+        path = str(row.get("path", ""))
+        delta = int(row.get("delta_bytes", 0))
+        writer = row.get("writer")
+        for rule in APP_SIGNATURE_RULES:
+            if rule["pattern"] in path.lower():
+                who = writer or rule["app"]
+                item = _touch(str(who))
+                item["score"] += max(1.0, abs(delta) / (1024 * 1024)) * 1.2
+                if writer:
+                    item["observation"] = "directly_observed_writer"
+                item["evidence"].append(
+                    {
+                        "type": "directory_growth_window",
+                        "reference": path,
+                        "delta_bytes": delta,
+                    }
+                )
+
+    for row in event_window.get("extension_surges", []) or []:
+        ext = str(row.get("extension", ""))
+        delta = int(row.get("delta_bytes", 0))
+        inferred = "render_cache" if ext in {".tmp", ".cache", ".bin", ".pak"} else "unknown_extension_source"
+        item = _touch(inferred)
+        item["score"] += max(1.0, abs(delta) / (1024 * 1024))
+        item["evidence"].append({"type": "extension_surge", "reference": ext, "delta_bytes": delta})
+
+    for row in event_window.get("process_io_deltas", []) or []:
+        proc = str(row.get("process", "unknown"))
+        delta = int(row.get("write_bytes_delta", 0))
+        item = _touch(proc)
+        item["score"] += max(1.0, abs(delta) / (1024 * 1024)) * 1.5
+        if bool(row.get("direct_writer", False)):
+            item["observation"] = "directly_observed_writer"
+        item["evidence"].append({"type": "process_io_delta", "reference": proc, "write_bytes_delta": delta})
+
+    ranked = sorted(suspects.values(), key=lambda x: x["score"], reverse=True)
+    for item in ranked:
+        score = float(item["score"])
+        item["score"] = round(score, 2)
+        if score >= 20:
+            item["confidence_tier"] = "high"
+        elif score >= 8:
+            item["confidence_tier"] = "medium"
+        else:
+            item["confidence_tier"] = "low"
+
+    return {
+        "event_id": event_window.get("event_id"),
+        "window_start": event_window.get("window_start"),
+        "window_end": event_window.get("window_end"),
+        "suspects": ranked,
+    }
 
 
 def sample_free_space_timeline(
@@ -641,6 +729,7 @@ def sample_free_space_timeline(
     baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
+    attribution_reports: list[str] = []
 
     def _collect_io_snapshot() -> dict[str, Any]:
         if not capture_active_process_io:
@@ -817,6 +906,7 @@ def sample_free_space_timeline(
                 severity = "critical" if abs(delta) >= critical_drop else "significant"
                 spikes.append(
                     {
+                        "event_id": f"spike-{len(spikes) + 1}",
                         "timestamp": _utc_now_iso(),
                         "free_delta_bytes": delta,
                         "free_bytes": free,
@@ -840,6 +930,18 @@ def sample_free_space_timeline(
                         "bundle_dir": str(bundle_dir),
                         "sample": deleted_handles.get("deleted_open_file_handles", [])[:5],
                     })
+                event_window = {
+                    "event_id": spikes[-1]["event_id"],
+                    "window_start": spikes[-1]["timestamp"],
+                    "window_end": spikes[-1]["timestamp"],
+                    "directory_growth_windows": [],
+                    "extension_surges": [],
+                    "process_io_deltas": [],
+                }
+                report = attribute_growth(event_window)
+                report_path = out_path.parent / f"attribution_report_{spikes[-1]['event_id']}.json"
+                write_json_atomic(report_path, report)
+                attribution_reports.append(str(report_path))
 
             writer.writerow([_utc_now_iso(), total, free, used, delta, int(spike)])
             handle.flush()
@@ -860,6 +962,7 @@ def sample_free_space_timeline(
         "baseline_profile": profile,
         "baseline_profile_path": str(baseline_path),
         "mode": "watchdog_read_only",
+        "attribution_reports": attribution_reports,
         "evidence_bundle_count": len(evidence_bundles),
         "evidence_bundles": evidence_bundles,
         "signals": {
