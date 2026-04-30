@@ -14,6 +14,7 @@ import time
 
 from collections import Counter, defaultdict
 from config.excludes_loader import load_exclude_prefixes
+from config.path_rules import canonicalize_path, evaluate_rules, validate_rule_inputs
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
@@ -51,14 +52,7 @@ DEFAULT_EXCLUDES: list[str] = load_exclude_prefixes()
 
 
 def _norm_path_str(p: str) -> str:
-    """
-    Normalize a path string for reliable Windows comparisons:
-      - expand %VARS%
-      - normpath
-      - normcase (case-insensitive on Windows)
-    """
-    expanded = os.path.expandvars(p)
-    return os.path.normcase(os.path.normpath(expanded))
+    return canonicalize_path(p).canonical
 
 
 def _looks_like_path_prefix(s: str) -> bool:
@@ -98,6 +92,10 @@ def compile_excludes(excludes: set[str]) -> tuple[set[str], list[str]]:
     dir_names: set[str] = set()
     prefixes: list[str] = []
 
+    warn = validate_rule_inputs(excludes)
+    for w in warn:
+        print(f"[exclude-warning] {w}")
+
     # 1) User-provided excludes
     for raw in excludes:
         s = (raw or "").strip()
@@ -134,16 +132,7 @@ def is_under_any_prefix(p: Path, prefixes: list[str]) -> bool:
     """
     ps = _norm_path_str(str(p))
     for pref in prefixes:
-        if not pref:
-            continue
-
-        # Drive-root prefix like "E:\"
-        if pref.endswith(os.sep):
-            if ps.startswith(pref):
-                return True
-            continue
-
-        if ps == pref or ps.startswith(pref + os.sep):
+        if evaluate_rules(ps, [], [pref])[0] is False:
             return True
 
     return False
@@ -344,6 +333,7 @@ def _scan_root_append_to_con(
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
+    rule_trace: Optional[list[str]] = None,
 ) -> dict:
     """
     Walk root and insert file rows into SQLite.
@@ -413,6 +403,8 @@ def _scan_root_append_to_con(
 
         # Skip excluded directory prefix
         if is_under_any_prefix(d, exclude_prefixes):
+            if rule_trace is not None:
+                rule_trace.append(f"{d}\texcluded by prefix")
             continue
 
         # Skip reparse points if not following symlinks/junctions
@@ -430,10 +422,14 @@ def _scan_root_append_to_con(
 
                     # Skip by name
                     if name.lower() in exclude_names:
+                        if rule_trace is not None:
+                            rule_trace.append(f"{p}\texcluded by name:{name.lower()}")
                         continue
 
                     # Skip by full path prefix
                     if is_under_any_prefix(p, exclude_prefixes):
+                        if rule_trace is not None:
+                            rule_trace.append(f"{p}\texcluded by prefix")
                         continue
 
                     try:
