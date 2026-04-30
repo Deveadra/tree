@@ -14,7 +14,12 @@ class PrunePlanIntegrityTests(unittest.TestCase):
             f.write_text("x", encoding="utf-8")
             plan = {
                 "schema": "plan-prune",
-                "metadata": {"plan_version": service.PRUNE_PLAN_SCHEMA_VERSION, "generated_at": "2026-01-01T00:00:00Z", "source_id": "test"},
+                "metadata": {
+                    "plan_version": service.PRUNE_PLAN_SCHEMA_VERSION,
+                    "generated_at": "2026-01-01T00:00:00Z",
+                    "source_id": "test",
+                    "policy_firewall": {"violations": [], "rewritten": []},
+                },
                 "groups": 1,
                 "actions": [{"action": "recycle", "path": str(f), "size": 1, "snapshot": {"exists": True, "size": 1, "mtime": int(f.stat().st_mtime), "hash": None}}],
                 "files_to_prune": 1,
@@ -34,7 +39,12 @@ class PrunePlanIntegrityTests(unittest.TestCase):
             st = f.stat()
             plan = {
                 "schema": "plan-prune",
-                "metadata": {"plan_version": service.PRUNE_PLAN_SCHEMA_VERSION, "generated_at": "2026-01-01T00:00:00Z", "source_id": "test"},
+                "metadata": {
+                    "plan_version": service.PRUNE_PLAN_SCHEMA_VERSION,
+                    "generated_at": "2026-01-01T00:00:00Z",
+                    "source_id": "test",
+                    "policy_firewall": {"violations": [], "rewritten": []},
+                },
                 "groups": 1,
                 "actions": [{"action": "recycle", "path": str(f), "size": 1, "snapshot": {"exists": True, "size": st.st_size + 1, "mtime": int(st.st_mtime), "hash": None}}],
                 "files_to_prune": 1,
@@ -55,7 +65,12 @@ class PrunePlanIntegrityTests(unittest.TestCase):
             st = f.stat()
             plan = {
                 "schema": "plan-prune",
-                "metadata": {"plan_version": service.PRUNE_PLAN_SCHEMA_VERSION, "generated_at": "2026-01-01T00:00:00Z", "source_id": "test"},
+                "metadata": {
+                    "plan_version": service.PRUNE_PLAN_SCHEMA_VERSION,
+                    "generated_at": "2026-01-01T00:00:00Z",
+                    "source_id": "test",
+                    "policy_firewall": {"violations": [], "rewritten": []},
+                },
                 "groups": 1,
                 "actions": [{"action": "recycle", "path": str(f), "size": 1, "snapshot": {"exists": True, "size": st.st_size, "mtime": int(st.st_mtime), "hash": None}}],
                 "files_to_prune": 1,
@@ -87,7 +102,12 @@ class PrunePlanIntegrityTests(unittest.TestCase):
 
             plan = {
                 "schema": "plan-prune",
-                "metadata": {"plan_version": service.PRUNE_PLAN_SCHEMA_VERSION, "generated_at": "2026-01-01T00:00:00Z", "source_id": "test"},
+                "metadata": {
+                    "plan_version": service.PRUNE_PLAN_SCHEMA_VERSION,
+                    "generated_at": "2026-01-01T00:00:00Z",
+                    "source_id": "test",
+                    "policy_firewall": {"violations": [], "rewritten": []},
+                },
                 "groups": 1,
                 "actions": [
                     {"action": "recycle", "path": str(denied), "size": 1, "snapshot": {"exists": True, "size": 1, "mtime": int(denied.stat().st_mtime), "hash": None}},
@@ -101,6 +121,8 @@ class PrunePlanIntegrityTests(unittest.TestCase):
 
             with patch("core.service.windows_recycle", return_value=True) as mock_recycle:
                 with patch("core.service.evaluate_delete_permission", side_effect=[
+                    {"allow": False, "reason_code": "outside_safe_roots", "reason": "Path is outside selected scan roots."},
+                    {"allow": True, "reason_code": "allowed", "reason": "Allowed by protection policy."},
                     {"allow": False, "reason_code": "outside_safe_roots", "reason": "Path is outside selected scan roots."},
                     {"allow": True, "reason_code": "allowed", "reason": "Allowed by protection policy."},
                 ]):

@@ -60,6 +60,15 @@ def _validate_plan_structure(plan: dict[str, Any]) -> None:
     meta = plan.get("metadata", {})
     if meta.get("plan_version") != PRUNE_PLAN_SCHEMA_VERSION:
         raise ValueError(f"Unsupported plan version: {meta.get('plan_version')}")
+    for required_meta in ("generated_at", "source_id", "policy_firewall"):
+        if required_meta not in meta:
+            raise ValueError(f"Missing required plan metadata field: {required_meta}")
+    firewall = meta.get("policy_firewall")
+    if not isinstance(firewall, dict):
+        raise ValueError("Invalid policy firewall metadata")
+    for firewall_key in ("violations", "rewritten"):
+        if firewall_key not in firewall:
+            raise ValueError(f"Missing required policy firewall field: {firewall_key}")
 
 
 def _verify_plan_checksum(plan: dict[str, Any]) -> None:
@@ -69,6 +78,42 @@ def _verify_plan_checksum(plan: dict[str, Any]) -> None:
     actual = _sha256_json(unsigned)
     if not isinstance(expected, str) or expected != actual:
         raise ValueError("Plan checksum verification failed")
+
+
+def _run_pre_execution_guards(
+    *,
+    plan: dict[str, Any],
+    dry_run: bool,
+    yes: bool,
+    policy_cfg: Any,
+    enforce_safe_delete_roots: bool,
+    safe_delete_roots: list[Path] | None,
+) -> None:
+    # 1) policy check
+    for action in plan.get("actions", []):
+        path = action.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("Missing action path metadata")
+        action_mode = str(action.get("action", "delete"))
+        if action_mode in {"recycle", "delete", "move"}:
+            perm = evaluate_delete_permission(
+                path,
+                mode=action_mode,
+                action_type="delete",
+                safe_roots=safe_delete_roots if enforce_safe_delete_roots else None,
+                policy=policy_cfg,
+            )
+            # Fail closed on uncertain policy decisions.
+            if "allow" not in perm or not isinstance(perm.get("allow"), bool):
+                raise ValueError(f"Uncertain policy decision for {path}")
+
+    # 2) plan integrity check
+    _validate_plan_structure(plan)
+    _verify_plan_checksum(plan)
+
+    # 3) confirmation check
+    if not dry_run and not yes:
+        raise ValueError("Refusing destructive action without --yes")
 
 
 def scan_to_db(
@@ -266,14 +311,16 @@ def apply_prune(
     safe_delete_roots: list[Path] | None = None,
     policy_path: Path | None = None,
 ) -> dict[str, Any]:
-    _validate_plan_structure(plan)
-    _verify_plan_checksum(plan)
-
-    if not dry_run and not yes:
-        raise ValueError("Refusing destructive action without --yes")
-
     policy_cfg = resolve_protection_config(policy_path or DEFAULT_TOML)
     policy_cfg = replace(policy_cfg, enforce_safe_delete_roots=enforce_safe_delete_roots)
+    _run_pre_execution_guards(
+        plan=plan,
+        dry_run=dry_run,
+        yes=yes,
+        policy_cfg=policy_cfg,
+        enforce_safe_delete_roots=enforce_safe_delete_roots,
+        safe_delete_roots=safe_delete_roots,
+    )
 
     results = {
         "applied": 0,
