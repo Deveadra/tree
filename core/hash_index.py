@@ -11,7 +11,6 @@ def find_duplicates(
     db_path: Path,
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
-    compare_mode: bool = False,
     error_log_path: Optional[Path] = None,
     required_roots: Optional[tuple[int, int]] = None,
 ) -> list[DuplicateResultGroup]:
