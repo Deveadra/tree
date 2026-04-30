@@ -1,0 +1,7 @@
+{
+  "rankings": {
+    "root_cause": ["cache-cleanup", "archive-old-media"],
+    "reclaim_opportunity": ["archive-old-media", "cache-cleanup"]
+  },
+  "top_recommendation_id": "cache-cleanup"
+}
