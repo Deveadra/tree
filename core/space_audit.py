@@ -9,6 +9,7 @@ import json
 import errno
 import os
 import time
+import tempfile
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix
@@ -467,14 +468,32 @@ def write_space_reports(
     out_dir = Path(report_dir)
     safe_mkdir(out_dir)
 
+    generated_at = _utc_now_iso()
     paths = {
         "snapshot": str(out_dir / "space_snapshot.json"),
         "top_dirs": str(out_dir / "space_top_dirs.json"),
         "by_extension": str(out_dir / "space_by_extension.json"),
+        "usage_by_dir": str(out_dir / "space_usage_by_dir.json"),
+        "usage_topn": str(out_dir / "space_usage_topN.txt"),
+        "usage_by_ext": str(out_dir / "space_usage_by_ext.json"),
+        "audit_summary": str(out_dir / "space_audit_summary.json"),
+        "audit_meta": str(out_dir / "space_audit_meta.json"),
+        "audit_warnings": str(out_dir / "space_audit_warnings.txt"),
     }
     write_json_atomic(Path(paths["snapshot"]), snapshot)
-    write_json_atomic(Path(paths["top_dirs"]), {"schema_version": SCHEMA_VERSION, "rows": top_dirs})
-    write_json_atomic(Path(paths["by_extension"]), {"schema_version": SCHEMA_VERSION, "rows": by_ext})
+    top_dirs_payload = {"schema_version": SCHEMA_VERSION, "generated_at": generated_at, "rows": top_dirs}
+    by_ext_payload = {"schema_version": SCHEMA_VERSION, "generated_at": generated_at, "rows": by_ext}
+    write_json_atomic(Path(paths["top_dirs"]), top_dirs_payload)
+    write_json_atomic(Path(paths["by_extension"]), by_ext_payload)
+    write_json_atomic(Path(paths["usage_by_dir"]), {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "rows": [{"path": k, "bytes": int(v)} for k, v in snapshot.get("tree", {}).get("dir_bytes", {}).items()],
+    })
+    write_json_atomic(Path(paths["usage_by_ext"]), by_ext_payload)
+
+    top_lines = [f"{row.get('bytes', 0)}\t{row.get('path', '')}" for row in top_dirs]
+    _write_text_atomic(Path(paths["usage_topn"]), "\n".join(top_lines) + ("\n" if top_lines else ""))
 
     if diff is not None:
         paths["diff"] = str(out_dir / "space_diff.json")
@@ -486,7 +505,44 @@ def write_space_reports(
         paths["timeline_row"] = str(out_dir / "space_timeline_row.json")
         write_json_atomic(Path(paths["timeline_row"]), {"schema_version": SCHEMA_VERSION, "row": timeline_row})
 
+    warning_lines: list[str] = []
+    for warning in snapshot.get("caveats", []):
+        warning_lines.append(str(warning))
+    for row in top_dirs:
+        if "warning" in row:
+            warning_lines.append(str(row["warning"]))
+
+    _write_text_atomic(
+        Path(paths["audit_warnings"]),
+        "\n".join(warning_lines) + ("\n" if warning_lines else ""),
+    )
+    write_json_atomic(Path(paths["audit_summary"]), {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "summary": {
+            "tree_bytes": int(snapshot.get("totals", {}).get("tree_bytes", 0)),
+            "file_count": int(snapshot.get("totals", {}).get("file_count", 0)),
+            "warnings_count": len(warning_lines),
+        },
+    })
+    write_json_atomic(Path(paths["audit_meta"]), {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "run": snapshot.get("run", {}),
+        "artifacts": {k: str(v) for k, v in paths.items()},
+    })
+
     return paths
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    safe_mkdir(path.parent)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+        tmp.write(text)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
 
 
 __all__ = [
