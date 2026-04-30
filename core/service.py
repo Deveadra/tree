@@ -11,6 +11,7 @@ from core.actions import build_prune_plan, execute_prune_plan
 from core.hash_index import find_duplicates as hash_find_duplicates
 from core.models import DuplicateResultGroup, ScanRequest
 from core.protection_policy import evaluate_delete_permission
+from core.space_audit import sample_free_space_timeline
 from config.protection_loader import DEFAULT_TOML, resolve_protection_config
 from dupe_core import (
     DupeGroup,
@@ -108,6 +109,27 @@ def load_dupes(db_path: Path, compare_mode: bool = False) -> list[DupeGroup]:
         cancel_flag=lambda: False,
         metrics_cb=lambda _m: None,
         required_roots=required_roots,
+    )
+
+
+def run_free_space_watchdog(
+    root: Path,
+    report_dir: Path,
+    interval_seconds: float,
+    duration_seconds: float | None,
+    max_rows: int | None,
+    spike_threshold_bytes: int | None,
+    cancel_flag: Any | None = None,
+) -> dict[str, Any]:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    return sample_free_space_timeline(
+        root=root,
+        output_csv=report_dir / "free_space_timeline.csv",
+        interval_seconds=interval_seconds,
+        duration_seconds=duration_seconds,
+        max_rows=max_rows,
+        free_space_drop_spike_threshold_bytes=spike_threshold_bytes,
+        cancel_flag=cancel_flag,
     )
 
 
