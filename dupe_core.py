@@ -345,8 +345,11 @@ def apply_prune_plan(
     if require_confirmation and confirmation_token != expected:
         raise ValueError(f"Confirmation token required: '{expected}'")
 
-    if not dry_run and destination_dir is not None and not _is_writable_dir(destination_dir):
-        raise RuntimeError(f"Destination is not writable: {destination_dir}")
+    # In dry-run mode we must avoid any destination probe side effects.
+    # _is_writable_dir() creates the directory and a temporary file.
+    if destination_dir is not None and not dry_run:
+        if not _is_writable_dir(destination_dir):
+            raise RuntimeError(f"Destination is not writable: {destination_dir}")
 
     results: list[ApplyResult] = []
     for c in plan.get("candidates", []):
