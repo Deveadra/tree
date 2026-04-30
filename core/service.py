@@ -230,6 +230,7 @@ def plan_prune(
         safe_delete_roots=safe_delete_roots,
     )
 
+    planned_actions = compliance["safe_actions"] if enforce_safe_delete_roots else actions
     plan_actions = [*compliance["safe_actions"], *compliance["rewritten_actions"]]
 
     plan = {
@@ -244,6 +245,9 @@ def plan_prune(
             },
         },
         "groups": len(groups),
+        "actions": planned_actions,
+        "files_to_prune": len(planned_actions),
+        "bytes_reclaimable": sum(int(a.get("size", 0)) for a in planned_actions),
         "actions": plan_actions,
         "files_to_prune": len(compliance["safe_actions"]),
         "bytes_reclaimable": sum(int(a.get("size", 0)) for a in compliance["safe_actions"]),
@@ -364,17 +368,6 @@ def apply_prune(
                     ),
                 )
             continue
-        try:
-            windows_recycle([str(p)])
-            results["applied"] += 1
-            if audit_log:
-                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "ok"})
-        except Exception:
-            results["errors"] += 1
-            if audit_log:
-                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "error", "reason_code": "recycle_failed"})
-            continue
-
         if action_mode in {"recycle", "delete", "move"}:
             perm = evaluate_delete_permission(
                 str(p),

@@ -240,3 +240,8 @@ git push -u origin codex/add-space-audit-subcommand-to-cli.py
 ```
 
 After the branch exists on the remote, rerun the setup/fetch step.
+
+## CI gates and release checklist
+
+- CI gate workflow: `.github/workflows/ci.yml` (A-E gate jobs + release blocker).
+- Release checklist: `docs/release_checklist.md`.
