@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import getpass
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import shutil
 import stat
 import sqlite3
 import time
+import uuid
 
 from collections import Counter, defaultdict
 from config.excludes_loader import load_exclude_prefixes
@@ -69,6 +71,15 @@ class ApplyResult:
 
 # Normalized (case-insensitive on Windows) path prefixes loaded from config/excludes.toml
 DEFAULT_EXCLUDES: list[str] = load_exclude_prefixes()
+PROTECTED_PATH_DENYLIST: tuple[str, ...] = (
+    r"C:\Windows",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData",
+    r"C:\$Recycle.Bin",
+    r"C:\System Volume Information",
+    r"\\?\GLOBALROOT",
+)
 
 
 # ----------------------------
@@ -584,6 +595,7 @@ def _scan_root_append_to_con(
             last_emit = now
 
     stack: list[Path] = [root]
+    root_resolved = root.resolve()
     emit(force=True)
 
     while stack and not cancel_flag():
@@ -607,6 +619,11 @@ def _scan_root_append_to_con(
 
                     name = entry.name
                     p = Path(entry.path)
+                    try:
+                        if p.resolve() != root_resolved and root_resolved not in p.resolve().parents:
+                            continue
+                    except Exception:
+                        continue
 
                     # Skip by name
                     if name.lower() in exclude_names:
@@ -1223,6 +1240,34 @@ def append_jsonl_line(path: Path, obj: dict) -> None:
 
 def append_prune_event(report_dir: Path, event: dict) -> None:
     append_jsonl_line(report_dir / "prune_events.jsonl", event)
+
+
+def detect_elevated_privileges() -> bool:
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    return bool(getattr(os, "geteuid", lambda: 1)() == 0)
+
+
+def make_audit_event(
+    session_id: str,
+    action_type: str,
+    source_path: str,
+    outcome: str,
+    error: str = "",
+) -> dict:
+    return {
+        "event_id": str(uuid.uuid4()),
+        "actor": getpass.getuser(),
+        "session": session_id,
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "source_path": source_path,
+        "action_type": action_type,
+        "outcome": outcome,
+        "error": error,
+    }
 
 
 def write_scan_reports(

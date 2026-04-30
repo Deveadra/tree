@@ -10,6 +10,7 @@ import subprocess
 import sqlite3
 import sys
 import tkinter as tk
+import uuid
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 import traceback
@@ -65,8 +66,11 @@ from dupe_core import (
     analyze_path_prefixes,
     compile_excludes,
     DEFAULT_EXCLUDES,
+    PROTECTED_PATH_DENYLIST,
     DupeGroup,
     FileRec,
+    find_dupes_from_db,
+    detect_elevated_privileges,
     fmt_duration,
     fmt_time,
     format_bytes,
@@ -629,6 +633,7 @@ class MainWindow(QMainWindow):
         )
 
         self.report_dir: Path = self.reports_root
+        self.session_id: str = str(uuid.uuid4())
         self.current_digest: Optional[str] = None
 
         self.load_btn = QPushButton("Load previous scan…")
@@ -712,7 +717,12 @@ class MainWindow(QMainWindow):
 
         self.delete_mode = QComboBox()
         self.delete_mode.addItems(
-            ["Recycle Bin (recommended)", "Move to trash folder", "Permanent delete"]
+            [
+                "Recycle Bin (recommended)",
+                "Move to trash folder",
+                "Quarantine (move + manifest)",
+                "Permanent delete",
+            ]
         )
         self.prefer_path_edit = QLineEdit()
         self.prefer_path_edit.setPlaceholderText(
@@ -895,6 +905,7 @@ class MainWindow(QMainWindow):
         # Cache for compiled excludes (used by deletion safety checks)
         self._ex_cache_raw: Optional[str] = None
         self._ex_cache: tuple[set[str], list[str]] = (set(), [])
+        self.allowed_roots: list[Path] = []
 
     # ----------------------------
     # UI helpers
@@ -1082,7 +1093,7 @@ class MainWindow(QMainWindow):
 
     def on_delete_mode_changed(self) -> None:
         mode = self.delete_mode.currentText()
-        enable_trash = "Move to trash folder" in mode
+        enable_trash = ("Move to trash folder" in mode) or ("Quarantine" in mode)
         self.trash_folder_edit.setEnabled(enable_trash)
         self.trash_folder_btn.setEnabled(enable_trash)
 
@@ -1165,6 +1176,22 @@ class MainWindow(QMainWindow):
 
         return None
 
+    def _is_under_any_root(self, path: Path) -> bool:
+        rp = path.resolve()
+        for root in self.allowed_roots:
+            rr = root.resolve()
+            if rp == rr or rr in rp.parents:
+                return True
+        return False
+
+    def _matches_protected_denylist(self, path: str) -> Optional[str]:
+        ps = os.path.normcase(os.path.normpath(os.path.expandvars(path)))
+        for pref in PROTECTED_PATH_DENYLIST:
+            n = os.path.normcase(os.path.normpath(os.path.expandvars(pref)))
+            if ps == n or ps.startswith(n + os.sep):
+                return n
+        return None
+
     # ----------------------------
     # Scan control
     # ----------------------------
@@ -1202,6 +1229,7 @@ class MainWindow(QMainWindow):
                 )
                 return
             roots.append(root_b)
+        self.allowed_roots = list(roots)
 
         reports_root = self._reports_root_dir()
         self.reports_root = reports_root
@@ -1223,6 +1251,13 @@ class MainWindow(QMainWindow):
 
         min_size = int(self.min_size_spin.value())
         follow = bool(self.follow_symlinks_chk.isChecked())
+        if detect_elevated_privileges() and follow:
+            QMessageBox.warning(
+                self,
+                "Risky mode blocked",
+                "Following symlinks/junctions while elevated is blocked unless explicit unsafe mode is enabled.",
+            )
+            return
 
         self.clear_results()
         self.start_btn.setEnabled(False)
@@ -1608,16 +1643,49 @@ class MainWindow(QMainWindow):
 
             dst = td / f"{src.name}.{time.time_ns()}"
             shutil.move(str(src), str(dst))
+            return str(dst)
 
         for p in delete_paths:
             try:
+                p_obj = Path(p)
+                if not self._is_under_any_root(p_obj):
+                    failed.append((p, "Path is outside selected scan roots"))
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(
+                            self.session_id, "delete", p, "blocked", "outside_allowed_roots"
+                        ),
+                    )
+                    continue
+
+                deny = self._matches_protected_denylist(p)
+                if deny:
+                    failed.append((p, f"Protected denylist path: {deny}"))
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(
+                            self.session_id, "delete", p, "blocked", f"protected_path:{deny}"
+                        ),
+                    )
+                    continue
+
                 hit = self._excluded_component_in_path(p)
                 if hit:
                     failed.append((p, f"PROTECTED: path matches exclude '{hit}'"))
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(
+                            self.session_id, "delete", p, "blocked", f"user_exclude:{hit}"
+                        ),
+                    )
                     continue
 
                 if not os.path.exists(p):
                     removed.append(p)
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(self.session_id, "delete", p, "noop_missing"),
+                    )
                     continue
 
                 if "Recycle Bin" in mode:
@@ -1626,6 +1694,19 @@ class MainWindow(QMainWindow):
                     if trash_dir is None:
                         raise RuntimeError("Trash directory not set.")
                     try_move_to_trash(p, trash_dir)
+                elif "Quarantine" in mode:
+                    if trash_dir is None:
+                        raise RuntimeError("Quarantine directory not set.")
+                    qdir = trash_dir / "_quarantine"
+                    dst = try_move_to_trash(p, qdir)
+                    manifest = {
+                        "source_path": p,
+                        "quarantine_path": dst,
+                        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "session": self.session_id,
+                        "mode": "quarantine",
+                    }
+                    append_prune_event(self.report_dir, {"quarantine_manifest": manifest})
                 else:
                     os.remove(p)
 
@@ -1633,9 +1714,19 @@ class MainWindow(QMainWindow):
                     failed.append((p, "File still exists after operation"))
                 else:
                     removed.append(p)
+                    append_prune_event(
+                        self.report_dir,
+                        make_audit_event(self.session_id, "delete", p, "success"),
+                    )
 
             except Exception as e:
                 failed.append((p, f"{type(e).__name__}: {e}"))
+                append_prune_event(
+                    self.report_dir,
+                    make_audit_event(
+                        self.session_id, "delete", p, "error", f"{type(e).__name__}: {e}"
+                    ),
+                )
 
         return removed, failed
 
@@ -1687,3 +1778,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    make_audit_event,
