@@ -369,7 +369,7 @@ def apply_prune_plan(
     if require_confirmation and confirmation_token != expected:
         raise ValueError(f"Confirmation token required: '{expected}'")
 
-    if destination_dir is not None and not _is_writable_dir(destination_dir):
+    if not dry_run and destination_dir is not None and not _is_writable_dir(destination_dir):
         raise RuntimeError(f"Destination is not writable: {destination_dir}")
 
     results: list[ApplyResult] = []

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.ai.action_catalog import build_action_step, order_steps
+from core.ai.prompt_security import build_strict_prompt_template, validate_allowlisted_schema
 
 
 @dataclass(frozen=True)
@@ -249,7 +250,7 @@ def build_recommendations(
 
     top = ordered[: max(1, config.top_n)]
 
-    return {
+    response = {
         "recommendations": top,
         "rankings": {
             "root_cause": [r["id"] for r in sorted(ordered, key=lambda x: (-x["root_cause_score"], str(x["id"])))],
@@ -276,3 +277,5 @@ def build_recommendations(
             },
         },
     }
+    validate_allowlisted_schema(response, allowlisted_keys={"recommendations", "rankings", "deterministic"})
+    return response

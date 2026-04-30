@@ -11,7 +11,12 @@ import errno
 import os
 import time
 import tempfile
-import resource
+import sys
+
+if sys.platform != "win32":
+    import resource as _resource
+else:
+    _resource = None
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix, is_within_safe_delete_roots
@@ -47,7 +52,21 @@ def _redact_path_string(value: str, hash_usernames: bool, hash_filenames: bool) 
     return "/".join(redacted)
 
 
-def _apply_redaction_payload(payload: Any, *, hash_usernames: bool, hash_filenames: bool, hash_process_arguments: bool) -> Any:
+def _is_path_key(key: str) -> bool:
+    normalized = key.lower()
+    if normalized in {"path", "target", "dir", "file", "filename", "safe_delete_roots", "protected_prefixes"}:
+        return True
+    return normalized.endswith("_path") or normalized.endswith("_paths")
+
+
+def _apply_redaction_payload(
+    payload: Any,
+    *,
+    hash_usernames: bool,
+    hash_filenames: bool,
+    hash_process_arguments: bool,
+    parent_key: str | None = None,
+) -> Any:
     if isinstance(payload, dict):
         out: dict[str, Any] = {}
         for k, v in payload.items():
@@ -55,15 +74,36 @@ def _apply_redaction_payload(payload: Any, *, hash_usernames: bool, hash_filenam
             if isinstance(v, str):
                 if hash_process_arguments and key in {"cmdline", "args", "command", "command_line"}:
                     out[k] = f"args:{_sha_token(v)}"
-                elif key in {"path", "target", "dir", "file", "filename"}:
+                elif _is_path_key(key):
                     out[k] = _redact_path_string(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames)
                 else:
                     out[k] = v
             else:
-                out[k] = _apply_redaction_payload(v, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments)
+                out[k] = _apply_redaction_payload(
+                    v,
+                    hash_usernames=hash_usernames,
+                    hash_filenames=hash_filenames,
+                    hash_process_arguments=hash_process_arguments,
+                    parent_key=key,
+                )
         return out
     if isinstance(payload, list):
-        return [_apply_redaction_payload(item, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments) for item in payload]
+        out_list: list[Any] = []
+        path_like_list = bool(parent_key and _is_path_key(parent_key))
+        for item in payload:
+            if isinstance(item, str) and path_like_list:
+                out_list.append(_redact_path_string(item, hash_usernames=hash_usernames, hash_filenames=hash_filenames))
+            else:
+                out_list.append(
+                    _apply_redaction_payload(
+                        item,
+                        hash_usernames=hash_usernames,
+                        hash_filenames=hash_filenames,
+                        hash_process_arguments=hash_process_arguments,
+                        parent_key=parent_key,
+                    )
+                )
+        return out_list
     return payload
 
 
@@ -1191,10 +1231,11 @@ def sample_free_space_timeline(
                     alert_windows[cause_window_id] = deduped_event
                     deduped_alerts.append(deduped_event)
                     metadata = {"first_seen": event_ts, "last_seen": event_ts, "count": 1}
-                spikes.append(deduped_event)
-                if not local_only_mode:
-                    _append_alert_feed({**deduped_event, "metadata": metadata})
-                _notify_local(f"[space-watchdog] {deduped_event['severity']} alert {deduped_event['root_cause_window']} count={deduped_event['count']}")
+                spike_event_id = f"spike-{int(time.time() * 1000)}-{rows_written}"
+                spike_event = {**deduped_event, "spike_event_id": spike_event_id}
+                spikes.append(spike_event)
+                _append_alert_feed({**spike_event, "metadata": metadata})
+                _notify_local(f"[space-watchdog] {spike_event['severity']} alert {spike_event['root_cause_window']} count={spike_event['count']}")
                 shrink_total = int(diff.get("totals", {}).get("total_shrink_bytes", 0))
                 if shrink_total > 0 and delta <= 0:
                     non_recovery_events.append({
@@ -1212,7 +1253,7 @@ def sample_free_space_timeline(
                         "sample": deleted_handles.get("deleted_open_file_handles", [])[:5],
                     })
                 event_window = {
-                    "event_id": spikes[-1]["event_id"],
+                    "event_id": spikes[-1]["spike_event_id"],
                     "window_start": spikes[-1]["timestamp"],
                     "window_end": spikes[-1]["timestamp"],
                     "directory_growth_windows": [],
@@ -1220,7 +1261,7 @@ def sample_free_space_timeline(
                     "process_io_deltas": [],
                 }
                 report = attribute_growth(event_window)
-                report_path = out_path.parent / f"attribution_report_{spikes[-1]['event_id']}.json"
+                report_path = out_path.parent / f"attribution_report_{spikes[-1]['spike_event_id']}.json"
                 write_json_atomic(report_path, report)
                 attribution_reports.append(str(report_path))
 
@@ -1295,10 +1336,11 @@ def sample_correlated_space_timeline(
     growth_path = Path(output_growth_csv)
     safe_mkdir(fast_path.parent)
     safe_mkdir(growth_path.parent)
-    if max_cpu_seconds is not None and max_cpu_seconds > 0:
-        resource.setrlimit(resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
-    if max_memory_bytes is not None and max_memory_bytes > 0:
-        resource.setrlimit(resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
+    if _resource is not None:
+        if max_cpu_seconds is not None and max_cpu_seconds > 0:
+            _resource.setrlimit(_resource.RLIMIT_CPU, (int(max_cpu_seconds), int(max_cpu_seconds)))
+        if max_memory_bytes is not None and max_memory_bytes > 0:
+            _resource.setrlimit(_resource.RLIMIT_AS, (int(max_memory_bytes), int(max_memory_bytes)))
 
     start_mono = time.monotonic()
     next_fast = start_mono

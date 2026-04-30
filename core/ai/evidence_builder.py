@@ -7,6 +7,7 @@ from typing import Any
 from dupe_core import safe_mkdir, write_json_atomic
 
 from core.ai.evidence_schema import EVIDENCE_SCHEMA_VERSION, validate_evidence_schema
+from core.ai.prompt_security import sanitize_untrusted_text
 
 
 def _utc_now_iso() -> str:
@@ -60,7 +61,7 @@ def build_normalized_evidence(
             _feature({"policy": policy_context_payload}, source_file="policy_context.json", run_id=run_id, event_id=event_id, timestamp=ts),
         ],
         "user_notes_context": [
-            _feature({"notes": user_notes or "", "context": user_context or {}}, source_file="user_context", run_id=run_id, event_id=event_id, timestamp=ts),
+            _feature({"notes": sanitize_untrusted_text(user_notes), "context": user_context or {}}, source_file="user_context", run_id=run_id, event_id=event_id, timestamp=ts),
         ],
     }
     validate_evidence_schema(evidence)
