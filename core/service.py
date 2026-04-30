@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
+from core.actions import build_prune_plan, execute_prune_plan
+from core.hash_index import find_duplicates as hash_find_duplicates
+from core.models import DuplicateResultGroup, ScanRequest
 from dupe_core import (
     DupeGroup,
-    FileRec,
     analyze_path_prefixes,
     append_prune_event,
-    compile_excludes,
     find_dupes_from_db,
     format_bytes,
     safe_mkdir,
@@ -38,6 +39,8 @@ def scan_to_db(
             excludes=excludes,
             follow_symlinks=follow_symlinks,
             min_size=min_size,
+            cancel_flag=lambda: False,
+            metrics_cb=lambda _m: None,
             scan_error_log_path=scan_error_log_path,
         )
     return scan_root_to_db(
@@ -46,12 +49,20 @@ def scan_to_db(
         excludes=excludes,
         follow_symlinks=follow_symlinks,
         min_size=min_size,
+        cancel_flag=lambda: False,
+        metrics_cb=lambda _m: None,
         scan_error_log_path=scan_error_log_path,
     )
 
 
 def load_dupes(db_path: Path, compare_mode: bool = False) -> list[DupeGroup]:
-    return find_dupes_from_db(db_path, compare_mode=compare_mode)
+    required_roots = (0, 1) if compare_mode else None
+    return find_dupes_from_db(
+        db_path=db_path,
+        cancel_flag=lambda: False,
+        metrics_cb=lambda _m: None,
+        required_roots=required_roots,
+    )
 
 
 def serialize_dupes(groups: list[DupeGroup]) -> list[dict[str, Any]]:
@@ -114,14 +125,22 @@ def apply_prune(plan: dict[str, Any], dry_run: bool = True, yes: bool = False, a
 
 def write_reports(report_dir: Path, groups: list[DupeGroup], scan_stats: dict[str, Any], excludes: set[str]) -> None:
     safe_mkdir(report_dir)
-    write_scan_reports(report_dir=report_dir, dupes=groups, scan_stats=scan_stats, excludes=excludes)
-    write_live_reports(report_dir=report_dir, dupes=groups, scan_stats=scan_stats)
+    # scan_stats and excludes are accepted for API stability with existing callers.
+    write_scan_reports(report_dir=report_dir, dupes=groups)
+    write_live_reports(report_dir=report_dir, dupes=groups)
     suggestions = analyze_path_prefixes(groups)
     write_path_suggestions(report_dir, suggestions)
 
 
-def scan(request: ScanRequest) -> dict:
-    return _scan(request)
+def scan(request: ScanRequest) -> dict[str, Any]:
+    return scan_to_db(
+        roots=request.roots,
+        db_path=request.db_path,
+        excludes=request.excludes,
+        follow_symlinks=request.follow_symlinks,
+        min_size=request.min_size,
+        scan_error_log_path=request.scan_error_log_path,
+    )
 
 
 def find_duplicates(
@@ -132,7 +151,7 @@ def find_duplicates(
     error_log_path: Optional[Path] = None,
     required_roots: Optional[tuple[int, int]] = None,
 ) -> list[DuplicateResultGroup]:
-    return _find_duplicates(
+    return hash_find_duplicates(
         db_path=db_path,
         cancel_flag=cancel_flag,
         metrics_cb=metrics_cb,
@@ -142,4 +161,15 @@ def find_duplicates(
     )
 
 
-__all__ = ["scan", "find_duplicates", "build_prune_plan", "execute_prune_plan"]
+__all__ = [
+    "scan_to_db",
+    "load_dupes",
+    "serialize_dupes",
+    "plan_prune",
+    "apply_prune",
+    "write_reports",
+    "scan",
+    "find_duplicates",
+    "build_prune_plan",
+    "execute_prune_plan",
+]
