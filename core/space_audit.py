@@ -599,6 +599,11 @@ def sample_free_space_timeline(
     duration_seconds: float | None = None,
     max_rows: int | None = None,
     free_space_drop_spike_threshold_bytes: int | None = None,
+    capture_active_process_io: bool = False,
+    policy_path: str | Path | None = None,
+    retention_max_bundles: int | None = None,
+    retention_max_disk_bytes: int | None = None,
+    top_n_deltas: int = 20,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Periodically capture free-space metrics into CSV.
@@ -628,7 +633,63 @@ def sample_free_space_timeline(
     rows_written = 0
     previous_free: int | None = None
     spikes: list[dict[str, Any]] = []
+    evidence_bundles: list[dict[str, Any]] = []
+    baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
+    protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
+
+    def _collect_io_snapshot() -> dict[str, Any]:
+        if not capture_active_process_io:
+            return {"enabled": False}
+        pid = os.getpid()
+        io_path = Path(f"/proc/{pid}/io")
+        payload: dict[str, Any] = {"enabled": True, "pid": pid}
+        if io_path.exists():
+            try:
+                rows = io_path.read_text(encoding="utf-8").splitlines()
+                for row in rows:
+                    if ":" in row:
+                        key, value = row.split(":", 1)
+                        payload[key.strip()] = int(value.strip())
+            except OSError as exc:
+                payload["error"] = str(exc)
+        else:
+            payload["error"] = "process io counters unavailable on this platform"
+        return payload
+
+    def _bundle_size_bytes(bundle_dir: Path) -> int:
+        total = 0
+        for p in bundle_dir.rglob("*"):
+            if p.is_file():
+                total += p.stat().st_size
+        return total
+
+    def _prune_bundles() -> None:
+        bundles = sorted(
+            [p for p in out_path.parent.glob("evidence_bundle_*") if p.is_dir()],
+            key=lambda p: p.stat().st_mtime,
+        )
+        if retention_max_bundles is not None and retention_max_bundles >= 0:
+            while len(bundles) > retention_max_bundles:
+                doomed = bundles.pop(0)
+                for item in sorted(doomed.rglob("*"), reverse=True):
+                    if item.is_file():
+                        item.unlink(missing_ok=True)
+                    else:
+                        item.rmdir()
+                doomed.rmdir()
+        if retention_max_disk_bytes is not None and retention_max_disk_bytes >= 0:
+            while True:
+                usage = sum(_bundle_size_bytes(p) for p in bundles)
+                if usage <= retention_max_disk_bytes or not bundles:
+                    break
+                doomed = bundles.pop(0)
+                for item in sorted(doomed.rglob("*"), reverse=True):
+                    if item.is_file():
+                        item.unlink(missing_ok=True)
+                    else:
+                        item.rmdir()
+                doomed.rmdir()
 
     with out_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -661,6 +722,54 @@ def sample_free_space_timeline(
             threshold = int(free_space_drop_spike_threshold_bytes) if free_space_drop_spike_threshold_bytes is not None else significant_drop
             if previous_free is not None and delta < 0 and abs(delta) > minor_band and abs(delta) >= threshold:
                 spike = True
+                event_id = f"{int(time.time())}_{rows_written}"
+                bundle_dir = out_path.parent / f"evidence_bundle_{event_id}"
+                safe_mkdir(bundle_dir)
+                current_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
+                diff = diff_space_snapshots(current_snapshot, baseline_snapshot)
+                top_dir_deltas = sorted(
+                    diff.get("tree", {}).get("dir_bytes_delta", {}).items(),
+                    key=lambda item: abs(int(item[1])),
+                    reverse=True,
+                )[: max(1, int(top_n_deltas))]
+                top_ext_deltas = sorted(
+                    diff.get("extensions", {}).get("ext_bytes_delta", {}).items(),
+                    key=lambda item: abs(int(item[1])),
+                    reverse=True,
+                )[: max(1, int(top_n_deltas))]
+                write_json_atomic(bundle_dir / "disk_metrics.json", {
+                    "timestamp": _utc_now_iso(),
+                    "total_bytes": total,
+                    "free_bytes": free,
+                    "used_bytes": used,
+                    "free_delta_bytes": delta,
+                    "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
+                })
+                write_json_atomic(bundle_dir / "top_dir_deltas.json", {"rows": [{"dir": k, "delta_bytes": int(v)} for k, v in top_dir_deltas]})
+                write_json_atomic(bundle_dir / "top_extension_deltas.json", {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]})
+                write_json_atomic(bundle_dir / "process_io_snapshot.json", _collect_io_snapshot())
+                write_json_atomic(bundle_dir / "policy_context.json", {
+                    "policy_path": str(Path(policy_path).resolve()) if policy_path else str(DEFAULT_TOML),
+                    "enforce_safe_delete_roots": bool(protection_cfg.enforce_safe_delete_roots),
+                    "safe_delete_roots": list(protection_cfg.safe_delete_roots),
+                    "protected_prefixes": list(protection_cfg.protected_prefixes),
+                    "protected_dir_names": list(protection_cfg.protected_dir_names),
+                })
+                manifest = {
+                    "event_id": event_id,
+                    "bundle_dir": str(bundle_dir),
+                    "generated_at": _utc_now_iso(),
+                    "artifacts": {
+                        "disk_metrics": str(bundle_dir / "disk_metrics.json"),
+                        "top_dir_deltas": str(bundle_dir / "top_dir_deltas.json"),
+                        "top_extension_deltas": str(bundle_dir / "top_extension_deltas.json"),
+                        "process_io_snapshot": str(bundle_dir / "process_io_snapshot.json"),
+                        "policy_context": str(bundle_dir / "policy_context.json"),
+                    },
+                }
+                write_json_atomic(bundle_dir / "bundle_manifest.json", manifest)
+                evidence_bundles.append(manifest)
+                _prune_bundles()
                 severity = "critical" if abs(delta) >= critical_drop else "significant"
                 spikes.append(
                     {
@@ -691,4 +800,6 @@ def sample_free_space_timeline(
         "baseline_profile": profile,
         "baseline_profile_path": str(baseline_path),
         "mode": "watchdog_read_only",
+        "evidence_bundle_count": len(evidence_bundles),
+        "evidence_bundles": evidence_bundles,
     }

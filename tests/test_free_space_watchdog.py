@@ -39,6 +39,46 @@ def test_spike_detection_records_events():
         assert result["spike_count"] >= 0
 
 
+def test_spike_creates_evidence_bundle_and_manifest():
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_csv = root / "free_space_timeline.csv"
+        result = sample_free_space_timeline(
+            root=root,
+            output_csv=out_csv,
+            interval_seconds=0.0,
+            max_rows=2,
+            free_space_drop_spike_threshold_bytes=1,
+            capture_active_process_io=True,
+            retention_max_bundles=5,
+            retention_max_disk_bytes=10_000_000,
+        )
+        if result["evidence_bundle_count"] > 0:
+            bundle = Path(result["evidence_bundles"][0]["bundle_dir"])
+            assert (bundle / "bundle_manifest.json").exists()
+            assert (bundle / "disk_metrics.json").exists()
+            assert (bundle / "top_dir_deltas.json").exists()
+            assert (bundle / "top_extension_deltas.json").exists()
+            assert (bundle / "process_io_snapshot.json").exists()
+            assert (bundle / "policy_context.json").exists()
+
+
+def test_bundle_retention_max_bundles_prunes_oldest():
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_csv = root / "free_space_timeline.csv"
+        sample_free_space_timeline(
+            root=root,
+            output_csv=out_csv,
+            interval_seconds=0.0,
+            max_rows=4,
+            free_space_drop_spike_threshold_bytes=1,
+            retention_max_bundles=1,
+        )
+        bundles = [p for p in root.glob("evidence_bundle_*") if p.is_dir()]
+        assert len(bundles) <= 1
+
+
 def test_watchdog_respects_cancellation_and_schema_shape():
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
