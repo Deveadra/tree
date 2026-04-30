@@ -17,6 +17,7 @@ from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_pro
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix, is_within_safe_delete_roots
 
 from dupe_core import safe_mkdir, write_json_atomic
+from core.ai.evidence_builder import build_normalized_evidence, persist_normalized_evidence
 from core.space_categories import classify_path
 from core.collector_plugins import load_collector_plugins, run_plugins_safely
 
@@ -868,6 +869,9 @@ def sample_free_space_timeline(
     deduped_alerts: list[dict[str, Any]] = []
     alert_windows: dict[str, dict[str, Any]] = {}
     evidence_bundles: list[dict[str, Any]] = []
+    non_recovery_events: list[dict[str, Any]] = []
+    probable_deleted_open_events: list[dict[str, Any]] = []
+    plugin_failures = 0
     baseline_snapshot: dict[str, Any] | None = None
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
@@ -1064,6 +1068,18 @@ def sample_free_space_timeline(
                         safe_dir / name,
                         _apply_redaction_payload(payload, hash_usernames=hash_usernames, hash_filenames=hash_filenames, hash_process_arguments=hash_process_arguments),
                     )
+                normalized_evidence = build_normalized_evidence(
+                    run_id=str(int(started_at)),
+                    event_id=event_id,
+                    disk_metrics_payload=disk_metrics_payload,
+                    top_dir_payload=top_dir_payload,
+                    top_ext_payload=top_ext_payload,
+                    process_io_payload=process_io_payload,
+                    process_handles_payload=deleted_handles,
+                    plugin_payload=plugin_payload,
+                    policy_context_payload=policy_context_payload,
+                )
+                persist_normalized_evidence(bundle_dir, normalized_evidence)
                 manifest = {
                     "event_id": event_id,
                     "bundle_dir": str(bundle_dir),
