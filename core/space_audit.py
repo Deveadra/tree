@@ -868,10 +868,7 @@ def sample_free_space_timeline(
     deduped_alerts: list[dict[str, Any]] = []
     alert_windows: dict[str, dict[str, Any]] = {}
     evidence_bundles: list[dict[str, Any]] = []
-    non_recovery_events: list[dict[str, Any]] = []
-    probable_deleted_open_events: list[dict[str, Any]] = []
-    plugin_failures = 0
-    baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
+    baseline_snapshot: dict[str, Any] | None = None
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
     attribution_reports: list[str] = []
@@ -1014,6 +1011,8 @@ def sample_free_space_timeline(
                 event_id = f"{int(time.time())}_{rows_written}"
                 bundle_dir = out_path.parent / f"evidence_bundle_{event_id}"
                 safe_mkdir(bundle_dir)
+                if baseline_snapshot is None:
+                    baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 current_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 diff = diff_space_snapshots(current_snapshot, baseline_snapshot)
                 top_dir_deltas = sorted(
