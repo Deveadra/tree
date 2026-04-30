@@ -59,6 +59,31 @@ class SpaceAuditDiffTests(unittest.TestCase):
             )
             self.assertIn("diff_vs_previous", out)
             self.assertTrue((Path(tmp) / "space_diff_vs_previous.json").exists())
+    
+    def test_diff_extension_aggregation_and_schema_fields(self):
+        previous = {
+            "run": {"finished_at": "2026-04-29T10:00:00+00:00"},
+            "totals": {"tree_bytes": 50, "file_count": 2},
+            "tree": {"dir_bytes": {".": 50}},
+            "extensions": {"ext_bytes": {".txt": 20, ".bin": 30}},
+        }
+        current = {
+            "run": {"finished_at": "2026-04-30T10:00:00+00:00"},
+            "totals": {"tree_bytes": 65, "file_count": 3},
+            "tree": {"dir_bytes": {".": 65}},
+            "extensions": {"ext_bytes": {".txt": 10, ".bin": 50, ".log": 5}},
+        }
+
+        diff = diff_space_snapshots(current, previous)
+        self.assertEqual(diff["schema_version"], "1.1")
+        self.assertIn("run", diff)
+        self.assertIn("totals", diff)
+        self.assertIn("summary", diff)
+        self.assertIn("tree", diff)
+        self.assertIn("extensions", diff)
+        self.assertEqual(diff["extensions"]["ext_bytes_delta"][".txt"], -10)
+        self.assertEqual(diff["extensions"]["ext_bytes_delta"][".bin"], 20)
+        self.assertEqual(diff["extensions"]["ext_bytes_delta"][".log"], 5)
 
 
 if __name__ == "__main__":
