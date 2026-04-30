@@ -1,4 +1,4 @@
-from core.ai.recommendation_engine import build_recommendations
+from core.ai.recommendation_engine import AIExecutionConfig, build_recommendations
 
 
 def _sample_evidence():
@@ -58,3 +58,34 @@ def test_recommendation_artifacts_and_fallback_mode():
     assert rec["action_steps"][0]["expected_space_recovery_range_gb"]["min"] >= 0
     assert "verification_checkpoint" in rec["action_steps"][0]
     assert "rollback_path" in rec["action_steps"][0]
+
+
+def test_routing_budgets_cache_and_telemetry():
+    calls = {"count": 0}
+
+    def _rationale(rec):
+        calls["count"] += 1
+        return f"explain {rec['id']}"
+
+    evidence = _sample_evidence()
+    evidence["recommendation_candidates"][0]["task_type"] = "root_cause"
+    evidence["recommendation_candidates"][1]["task_type"] = "reclaim_opportunity"
+
+    execution = AIExecutionConfig(
+        model_routing={"root_cause": "local", "reclaim_opportunity": "cloud"},
+        token_budget_per_run=2,
+        time_budget_ms=10000,
+        max_analysis_window=2,
+    )
+    cache = {}
+
+    first = build_recommendations(evidence, execution_config=execution, rationale_generator=_rationale, artifact_cache=cache)
+    second = build_recommendations(evidence, execution_config=execution, rationale_generator=_rationale, artifact_cache=cache)
+
+    assert first["metadata"]["execution"]["model_routing"]["root_cause"] == "local"
+    assert first["metadata"]["analysis_window_applied"] == 2
+    assert first["metadata"]["telemetry"]["llm_calls"] >= 1
+    assert first["recommendations"][0]["analysis_evidence_hash"]
+    assert first["recommendations"][0]["model_route"] in {"local", "cloud"}
+    assert second["metadata"]["telemetry"]["cache_hits"] >= 1
+    assert calls["count"] <= 2
