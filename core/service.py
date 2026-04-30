@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 from core.actions import build_prune_plan, execute_prune_plan
 from core.hash_index import find_duplicates as hash_find_duplicates
 from core.models import DuplicateResultGroup, ScanRequest
+from core.ai.policy_firewall import enforce_plan_compliance
 from core.protection_policy import evaluate_delete_permission
 from core.space_audit import sample_correlated_space_timeline, sample_free_space_timeline
 from config.protection_loader import DEFAULT_TOML, resolve_protection_config
@@ -184,7 +185,13 @@ def serialize_dupes(groups: list[DupeGroup]) -> list[dict[str, Any]]:
     return out
 
 
-def plan_prune(groups: list[DupeGroup], source_id: str = "unknown") -> dict[str, Any]:
+def plan_prune(
+    groups: list[DupeGroup],
+    source_id: str = "unknown",
+    enforce_safe_delete_roots: bool = False,
+    safe_delete_roots: list[Path] | None = None,
+    policy_path: Path | None = None,
+) -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     bytes_reclaimable = 0
     for g in groups:
@@ -204,17 +211,31 @@ def plan_prune(groups: list[DupeGroup], source_id: str = "unknown") -> dict[str,
             })
             bytes_reclaimable += f.size
 
+    policy_cfg = resolve_protection_config(policy_path or DEFAULT_TOML)
+    policy_cfg = replace(policy_cfg, enforce_safe_delete_roots=enforce_safe_delete_roots)
+
+    compliance = enforce_plan_compliance(
+        actions,
+        policy=policy_cfg,
+        enforce_safe_delete_roots=enforce_safe_delete_roots,
+        safe_delete_roots=safe_delete_roots,
+    )
+
     plan = {
         "schema": "plan-prune",
         "metadata": {
             "plan_version": PRUNE_PLAN_SCHEMA_VERSION,
             "generated_at": _utc_now_iso(),
             "source_id": source_id,
+            "policy_firewall": {
+                "violations": compliance["violations"],
+                "rewritten": compliance["rewritten_actions"],
+            },
         },
         "groups": len(groups),
-        "actions": actions,
-        "files_to_prune": len(actions),
-        "bytes_reclaimable": bytes_reclaimable,
+        "actions": compliance["safe_actions"],
+        "files_to_prune": len(compliance["safe_actions"]),
+        "bytes_reclaimable": sum(int(a.get("size", 0)) for a in compliance["safe_actions"]),
         "dry_run_default": True,
     }
     plan["plan_checksum"] = _sha256_json(plan)
