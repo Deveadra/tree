@@ -913,8 +913,13 @@ def find_dupes_from_db(
         if resumed_dupes:
             dupes.extend(resumed_dupes)
 
+        # Only skip completed size groups if we also restored duplicate groups.
+        # A checkpoint that only contains "last_done_size" would otherwise drop
+        # previously found duplicates from skipped groups in this invocation.
+        can_skip_completed = last_done_size is not None and bool(resumed_dupes)
+
         for i, size in enumerate(sizes, start=1):
-            if last_done_size is not None and int(size) <= int(last_done_size):
+            if can_skip_completed and int(size) <= int(last_done_size):
                 done_groups = i
                 continue
             if cancel_flag():
