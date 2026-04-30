@@ -712,6 +712,8 @@ def sample_free_space_timeline(
                 break
             if max_rows is not None and rows_written >= max_rows:
                 break
+            if baseline_snapshot is None:
+                baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
 
             statvfs = os.statvfs(root_path)
             total = int(statvfs.f_blocks * statvfs.f_frsize)
@@ -725,8 +727,6 @@ def sample_free_space_timeline(
                 event_id = f"{int(time.time())}_{rows_written}"
                 bundle_dir = out_path.parent / f"evidence_bundle_{event_id}"
                 safe_mkdir(bundle_dir)
-                if baseline_snapshot is None:
-                    baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 current_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 diff = diff_space_snapshots(current_snapshot, baseline_snapshot)
                 top_dir_deltas = sorted(
