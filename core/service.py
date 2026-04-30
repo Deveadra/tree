@@ -341,6 +341,10 @@ def apply_prune(
             if audit_log:
                 append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "ok"})
         except Exception:
+            results["errors"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "error", "reason_code": "recycle_failed"})
+            continue
 
         if action_mode in {"recycle", "delete", "move"}:
             perm = evaluate_delete_permission(

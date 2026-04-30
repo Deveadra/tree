@@ -166,6 +166,7 @@ def build_recommendations(
 
         action_step = build_action_step(str(candidate.get("id", "")))
 
+        redaction_policy = evidence.get("redaction_policy", {}) if isinstance(evidence.get("redaction_policy"), dict) else {}
         rec = {
             "id": candidate.get("id", f"candidate-{idx}"),
             "title": candidate.get("title", "Recommendation"),
@@ -185,6 +186,11 @@ def build_recommendations(
             "thresholds": {"risk_tier": dict(config.risk_thresholds)},
             "action_steps": order_steps([action_step]) if action_step else [],
             "contains_irreversible_steps": bool(action_step and action_step.get("reversibility") == "irreversible"),
+            "redaction_impact": {
+                "summary": "Sensitive identifiers may be hidden in share-safe export.",
+                "hidden_fields": [k for k in ("usernames", "hostnames", "process_args", "path_segments") if k in redaction_policy],
+                "policy": dict(redaction_policy),
+            },
         }
 
         route = execution_config.model_routing.get(str(candidate.get("task_type", "risk_assessment")), "local")
@@ -277,5 +283,5 @@ def build_recommendations(
             },
         },
     }
-    validate_allowlisted_schema(response, allowlisted_keys={"recommendations", "rankings", "deterministic"})
+    validate_allowlisted_schema(response, allowlisted_keys={"recommendations", "rankings", "deterministic", "metadata"})
     return response

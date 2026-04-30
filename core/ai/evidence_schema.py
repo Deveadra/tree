@@ -39,6 +39,7 @@ def validate_evidence_schema(evidence: dict[str, Any]) -> None:
         "monitor_timeline_features",
         "protection_policy_state",
         "user_notes_context",
+        "external_model_provider_usage",
     )
     for section in required_sections:
         value = evidence.get(section)

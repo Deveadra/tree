@@ -3,6 +3,7 @@ from core.ai.recommendation_engine import AIExecutionConfig, build_recommendatio
 
 def _sample_evidence():
     return {
+        "redaction_policy": {"usernames": "hash", "hostnames": "hash", "process_args": "mask", "path_segments": "partial"},
         "recommendation_candidates": [
             {
                 "id": "cache-cleanup",
@@ -89,3 +90,10 @@ def test_routing_budgets_cache_and_telemetry():
     assert first["recommendations"][0]["model_route"] in {"local", "cloud"}
     assert second["metadata"]["telemetry"]["cache_hits"] >= 1
     assert calls["count"] <= 2
+
+
+def test_recommendations_include_redaction_impact_notes() -> None:
+    out = build_recommendations(_sample_evidence())
+    rec = out["recommendations"][0]
+    assert "redaction_impact" in rec
+    assert "usernames" in rec["redaction_impact"]["hidden_fields"]
