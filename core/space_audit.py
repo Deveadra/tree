@@ -373,7 +373,7 @@ def resolve_previous_snapshot(report_root: str | Path, current_report_dir: str |
     candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
     for snapshot_path in root.glob("**/space_snapshot.json"):
         snapshot_dir = snapshot_path.parent.resolve()
-        if snapshot_dir == current:
+        if snapshot_dir == current and root != current:
             continue
         try:
             data = json.loads(snapshot_path.read_text(encoding="utf-8"))
