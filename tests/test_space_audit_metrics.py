@@ -29,6 +29,10 @@ class SpaceAuditMetricsTests(unittest.TestCase):
             self.assertIn("caveats", snapshot)
             self.assertIn("dir_allocated_bytes", snapshot["tree"])
             self.assertIn("ext_allocated_bytes", snapshot["extensions"])
+            self.assertIn("protection", snapshot)
+            self.assertIn("skipped_regions", snapshot["protection"])
+            self.assertEqual(snapshot["protection"]["invariant"]["traversal"], "strict")
+            self.assertEqual(snapshot["protection"]["invariant"]["recommendations"], "advisory")
 
     def test_allocated_size_falls_back_when_st_blocks_unavailable(self):
         class FakeStat:
@@ -47,6 +51,28 @@ class SpaceAuditMetricsTests(unittest.TestCase):
             self.assertEqual(allocated_mode["confidence"], "low")
             self.assertIn("allocated size equals apparent size", allocated_mode["fallback_behavior"])
             self.assertEqual(snapshot["tree"]["dir_bytes"].get("."), snapshot["tree"]["dir_allocated_bytes"].get("."))
+
+    def test_skips_protected_prefix_and_records_metadata(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            protected = root / "secret"
+            protected.mkdir()
+            (protected / "hidden.bin").write_bytes(b"x" * 64)
+            (root / "visible.bin").write_bytes(b"y" * 8)
+
+            policy = root / "policy.toml"
+            protected_literal = str(protected).replace("\\", "\\\\")
+            policy.write_text(
+                f"enforce_safe_delete_roots = false\nprotected_prefixes = [\"{protected_literal}\"]\nsafe_delete_roots = []\n",
+                encoding="utf-8",
+            )
+
+            snapshot = scan_space_usage(root, excludes=[], policy_path=policy)
+
+            expected = (root / "visible.bin").stat().st_size + policy.stat().st_size
+            self.assertEqual(snapshot["tree"]["dir_bytes"].get(".", 0), expected)
+            skipped = snapshot["protection"]["skipped_regions"]
+            self.assertTrue(any(item["reason_code"] == "protected_prefix" for item in skipped))
 
 
 
