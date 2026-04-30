@@ -118,5 +118,5 @@ def test_correlated_watchdog_writes_both_streams_and_event_ids():
         assert len(fast_lines) == 3
         assert len(growth_lines) == 3
         assert fast_lines[0].startswith("event_id,stream,timestamp,total_bytes")
-        assert growth_lines[0].startswith("event_id,stream,timestamp,tree_bytes_delta")
+        assert growth_lines[0].startswith("event_id,stream,timestamp,tree_bytes_delta,top_dir_growth_path,top_dir_growth_zone")
         assert result["mode"] == "watchdog_correlated_read_only"
