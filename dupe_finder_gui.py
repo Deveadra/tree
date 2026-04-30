@@ -85,6 +85,8 @@ from dupe_core import (
     fmt_time,
     format_bytes,
     new_run_id,
+    write_live_reports,
+    write_scan_reports,
 )
 from core.models import ScanRequest
 from core.space_audit import (
