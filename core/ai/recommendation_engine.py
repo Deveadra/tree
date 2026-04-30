@@ -4,10 +4,13 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from core.ai.action_catalog import build_action_step, order_steps
 from core.ai.prompt_security import build_strict_prompt_template, sanitize_untrusted_text, validate_allowlisted_schema
+from core.ai.policy_firewall import validate_action_candidate
+from config.protection_loader import resolve_protection_config
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,11 @@ def _default_summary(rec: dict[str, Any]) -> str:
     )
 
 
+def _confidence_from_scores(root_cause_score: float, reclaim_score: float, risk_score: float) -> float:
+    spread = abs(root_cause_score - reclaim_score)
+    return _clamp01((root_cause_score * 0.5) + (reclaim_score * 0.3) + ((1.0 - spread) * 0.2) + (risk_score * 0.1))
+
+
 def _evidence_hash(evidence: dict[str, Any]) -> str:
     canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -182,6 +190,8 @@ def build_recommendations(
     recommendations: list[dict[str, Any]] = []
     cache = artifact_cache if artifact_cache is not None else {}
     telemetry = _RunTelemetry()
+    policy_cfg = resolve_protection_config()
+    safe_roots = [Path(p) for p in policy_cfg.safe_delete_roots]
 
     for idx, candidate in enumerate(candidates):
         metrics = candidate.get("metrics", {}) if isinstance(candidate.get("metrics"), dict) else {}
@@ -212,6 +222,7 @@ def build_recommendations(
             "reclaim_opportunity_score": reclaim_score,
             "risk_score": risk_score,
             "risk_tier": tier,
+            "confidence_score": _confidence_from_scores(root_cause_score, reclaim_score, risk_score),
             "score_components": {
                 "root_cause": root_components,
                 "reclaim_opportunity": reclaim_components,
@@ -246,6 +257,28 @@ def build_recommendations(
 
         route = execution_config.model_routing.get(str(candidate.get("task_type", "risk_assessment")), "local")
         rec["model_route"] = route
+
+        proposed_action = candidate.get("proposed_action") if isinstance(candidate.get("proposed_action"), dict) else None
+        if proposed_action:
+            violations = validate_action_candidate(
+                proposed_action,
+                policy=policy_cfg,
+                enforce_safe_delete_roots=policy_cfg.enforce_safe_delete_roots,
+                safe_delete_roots=safe_roots,
+            )
+            rec["protection_policy_validation"] = {
+                "ok": len(violations) == 0,
+                "violations": [v.to_dict() for v in violations],
+            }
+            if violations:
+                rec["action_steps"] = []
+                rec["contains_irreversible_steps"] = False
+                rec["risk_tier"] = "Dangerous"
+        else:
+            rec["protection_policy_validation"] = {
+                "ok": True,
+                "violations": [],
+            }
 
         evidence_key = _evidence_hash(
             {

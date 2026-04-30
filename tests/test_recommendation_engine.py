@@ -115,3 +115,15 @@ def test_recommendation_includes_explanation_action_plan_and_approval_workflow()
     assert rec["action_plan"]["guardrails"]["rollback_steps_required"] is True
     assert rec["approval_workflow"]["requires_explicit_confirmation_before_handoff"] is True
     assert rec["handoff_ready"] is False
+def test_candidates_include_confidence_and_policy_validation() -> None:
+    evidence = _sample_evidence()
+    evidence["recommendation_candidates"][0]["proposed_action"] = {
+        "action": "delete",
+        "path": r"C:\\Windows\\System32\\drivers\\etc\\hosts",
+    }
+    out = build_recommendations(evidence)
+    rec = next(r for r in out["recommendations"] if r["id"] == "cache-cleanup")
+    assert 0.0 <= rec["confidence_score"] <= 1.0
+    assert rec["protection_policy_validation"]["ok"] is False
+    assert rec["protection_policy_validation"]["violations"]
+    assert rec["action_steps"] == []
