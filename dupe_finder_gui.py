@@ -15,6 +15,7 @@ from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 import traceback
 import time
+import threading
 
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -32,6 +33,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QAction
+from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -60,6 +62,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
 )
 
 from core.service import (
@@ -74,7 +77,6 @@ from dupe_core import (
     analyze_path_prefixes,
     compile_excludes,
     DEFAULT_EXCLUDES,
-    PROTECTED_PATH_DENYLIST,
     DupeGroup,
     FileRec,
     find_dupes_from_db,
@@ -87,6 +89,16 @@ from dupe_core import (
     write_scan_reports,
 )
 from core.models import ScanRequest
+from core.space_audit import (
+    diff_space_snapshots,
+    resolve_previous_snapshot,
+    scan_space_usage,
+    summarize_by_extension,
+    summarize_top_dirs,
+    write_space_reports,
+)
+from config.protection_loader import DEFAULT_TOML
+from core.protection_policy import evaluate_delete_permission
 from core.service import (
     build_prune_plan,
     execute_prune_plan,
@@ -401,6 +413,89 @@ class ScanWorker(QObject):
             self.error.emit(str(e))
 
 
+class SpaceAuditWorker(QObject):
+    error = Signal(str)
+    finished = Signal(object)  # dict[str, Any]
+    metrics = Signal(object)  # dict
+    progress = Signal(int, int)  # current, total
+    status = Signal(str)
+    cancel = Signal(str)
+
+    def __init__(self, roots: list[Path], report_dir: Path, excludes: set[str], policy_path: Path):
+        super().__init__()
+        self.roots = roots
+        self.report_dir = report_dir
+        self.excludes = excludes
+        self.policy_path = policy_path
+        self._cancel_event = threading.Event()
+
+    def cancel_run(self, reason: str = "user_cancelled") -> None:
+        self._cancel_event.set()
+        self.cancel.emit(reason)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            safe_mkdir(self.report_dir)
+            snapshots: list[dict] = []
+            all_top_dirs: list[dict] = []
+            warnings: list[dict] = []
+            diff_summaries: list[dict] = []
+            self.progress.emit(0, max(1, len(self.roots)))
+            for idx, root in enumerate(self.roots, start=1):
+                if self._cancel_event.is_set():
+                    self.status.emit("Disk usage analysis cancelled.")
+                    self.finished.emit({"cancelled": True})
+                    return
+                self.status.emit(f"Analyzing disk usage: {root}")
+                snapshot = scan_space_usage(
+                    root=root,
+                    excludes=self.excludes,
+                    cancel_flag=self._cancel_event,
+                    metrics_cb=self.metrics.emit,
+                    policy_path=self.policy_path,
+                )
+                if self._cancel_event.is_set() or bool(snapshot.get("cancelled")):
+                    self.status.emit("Disk usage analysis cancelled.")
+                    self.finished.emit({"cancelled": True})
+                    return
+                top_dirs = summarize_top_dirs(snapshot, top_n=12)
+                by_ext = summarize_by_extension(snapshot, top_n=30)
+                prev = resolve_previous_snapshot(self.report_dir.parent, self.report_dir, root)
+                diff = diff_space_snapshots(snapshot, prev, noise_threshold_bytes=0) if prev else None
+                write_space_reports(
+                    report_dir=self.report_dir,
+                    snapshot=snapshot,
+                    top_dirs=top_dirs,
+                    by_ext=by_ext,
+                    diff=diff,
+                )
+                snapshots.append(snapshot)
+                all_top_dirs.extend([{"root": str(root), **row} for row in top_dirs[:5]])
+                warnings.extend(snapshot.get("protection", {}).get("skipped_regions", [])[:20])
+                if diff:
+                    diff_summaries.append(
+                        {
+                            "root": str(root),
+                            "net_change_bytes": int(diff.get("summary", {}).get("net_change_bytes", 0)),
+                        }
+                    )
+                self.progress.emit(idx, len(self.roots))
+
+            self.status.emit("Disk usage analysis complete.")
+            self.finished.emit(
+                {
+                    "cancelled": False,
+                    "snapshots": snapshots,
+                    "top_offenders": sorted(all_top_dirs, key=lambda row: int(row.get("bytes", 0)), reverse=True)[:10],
+                    "warnings": warnings,
+                    "diff_summaries": diff_summaries,
+                }
+            )
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class PrefixSuggestDialog(QDialog):
     """
     UI for ranked prefix suggestions with selection + add-to-preferred-paths support.
@@ -680,6 +775,7 @@ class MainWindow(QMainWindow):
         )
 
         self.start_btn = QPushButton("Start scan")
+        self.space_audit_btn = QPushButton("Analyze disk usage…")
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
 
@@ -700,6 +796,50 @@ class MainWindow(QMainWindow):
         self.status_box.setFixedHeight(110)
 
         self.tabs = QTabWidget()
+        self.monitor_tab = QWidget()
+        self.monitor_is_read_only_lbl = QLabel("Read-only monitor (no filesystem writes or delete actions).")
+        self.monitor_is_read_only_lbl.setStyleSheet("QLabel { color: #8b0000; font-weight: 700; }")
+        self.monitor_free_used_lbl = QLabel("Free/Used: n/a")
+        self.monitor_delta_lbl = QLabel("Recent delta: n/a")
+        self.monitor_alert_lbl = QLabel("Alert state: Normal")
+        self.monitor_alert_lbl.setStyleSheet("QLabel { color: #1f7a1f; font-weight: 700; }")
+        self.monitor_spark_chart = QChart()
+        self.monitor_spark_chart.legend().hide()
+        self.monitor_spark_chart.setBackgroundVisible(False)
+        self.monitor_sparkline = QLineSeries()
+        self.monitor_spark_chart.addSeries(self.monitor_sparkline)
+        self.monitor_spark_chart.createDefaultAxes()
+        self.monitor_spark_view = QChartView(self.monitor_spark_chart)
+        self.monitor_spark_view.setMinimumHeight(120)
+        self.monitor_spikes_table = QTableWidget(0, 5)
+        self.monitor_spikes_table.setHorizontalHeaderLabels(
+            ["Severity", "Time (UTC)", "Delta", "Top suspects", "Evidence bundle"]
+        )
+        self.monitor_spikes_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.monitor_spikes_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.monitor_spikes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.open_evidence_btn = QPushButton("Open evidence bundle")
+        self.open_evidence_btn.setEnabled(False)
+        self.monitor_interval_spin = QSpinBox()
+        self.monitor_interval_spin.setRange(1, 3600)
+        self.monitor_interval_spin.setValue(30)
+        self.monitor_interval_spin.setSuffix(" s")
+        self.monitor_trigger_spin = QSpinBox()
+        self.monitor_trigger_spin.setRange(1, 10_000_000)
+        self.monitor_trigger_spin.setValue(500)
+        self.monitor_trigger_spin.setSuffix(" MB")
+        self.monitor_retention_spin = QSpinBox()
+        self.monitor_retention_spin.setRange(1, 365)
+        self.monitor_retention_spin.setValue(14)
+        self.monitor_retention_spin.setSuffix(" days")
+        self.monitor_start_btn = QPushButton("Start")
+        self.monitor_pause_btn = QPushButton("Pause")
+        self.monitor_resume_btn = QPushButton("Resume")
+        self.monitor_pause_btn.setEnabled(False)
+        self.monitor_resume_btn.setEnabled(False)
+        self._monitor_mode = "stopped"
+        self._monitor_deltas: list[int] = []
+        self._monitor_spike_events: list[dict] = []
         self.tree_by_name = QTreeWidget()
         self.tree_by_name.setHeaderLabels(
             ["Grouped by filename (hash-confirmed duplicates)"]
@@ -710,6 +850,27 @@ class MainWindow(QMainWindow):
         )
         self.tabs.addTab(self.tree_by_name, "By filename")
         self.tabs.addTab(self.tree_by_hash, "By content")
+        self.tabs.addTab(self.monitor_tab, "Space monitor")
+        monitor_layout = QVBoxLayout(self.monitor_tab)
+        monitor_layout.addWidget(self.monitor_is_read_only_lbl)
+        monitor_layout.addWidget(self.monitor_free_used_lbl)
+        monitor_layout.addWidget(self.monitor_delta_lbl)
+        monitor_layout.addWidget(self.monitor_alert_lbl)
+        monitor_layout.addWidget(self.monitor_spark_view)
+        monitor_layout.addWidget(QLabel("Spike Events"))
+        monitor_layout.addWidget(self.monitor_spikes_table)
+        monitor_layout.addWidget(self.open_evidence_btn)
+        controls_form = QFormLayout()
+        controls_form.addRow("Sampling interval:", self.monitor_interval_spin)
+        controls_form.addRow("Trigger threshold:", self.monitor_trigger_spin)
+        controls_form.addRow("Retention setting:", self.monitor_retention_spin)
+        monitor_layout.addLayout(controls_form)
+        monitor_actions = QHBoxLayout()
+        monitor_actions.addWidget(self.monitor_start_btn)
+        monitor_actions.addWidget(self.monitor_pause_btn)
+        monitor_actions.addWidget(self.monitor_resume_btn)
+        monitor_actions.addStretch(1)
+        monitor_layout.addLayout(monitor_actions)
 
         self.files_table = QTableWidget(0, 4)
         self.files_table.setHorizontalHeaderLabels(
@@ -789,6 +950,7 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.space_audit_btn)
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.load_btn)
         btn_row.addWidget(self.open_reports_btn)
@@ -895,6 +1057,7 @@ class MainWindow(QMainWindow):
         self.trash_folder_btn.clicked.connect(self.pick_trash_dir)
 
         self.start_btn.clicked.connect(self.start_scan)
+        self.space_audit_btn.clicked.connect(self.start_space_audit)
         self.cancel_btn.clicked.connect(self.cancel_scan)
         self.load_btn.clicked.connect(self.load_previous_scan)
         self.open_reports_btn.clicked.connect(self.open_current_report_folder)
@@ -907,15 +1070,95 @@ class MainWindow(QMainWindow):
         self.open_folder_btn.clicked.connect(self.open_selected_folder)
 
         self.delete_mode.currentIndexChanged.connect(self.on_delete_mode_changed)
+        self.monitor_spikes_table.itemSelectionChanged.connect(self._on_monitor_spike_selection_changed)
+        self.open_evidence_btn.clicked.connect(self._open_selected_evidence_bundle)
+        self.monitor_start_btn.clicked.connect(lambda: self._set_monitor_mode("running"))
+        self.monitor_pause_btn.clicked.connect(lambda: self._set_monitor_mode("paused"))
+        self.monitor_resume_btn.clicked.connect(lambda: self._set_monitor_mode("running"))
         self.on_delete_mode_changed()
 
         self.worker_thread: Optional[QThread] = None
         self.worker: Optional[ScanWorker] = None
+        self.space_audit_thread: Optional[QThread] = None
+        self.space_audit_worker: Optional[SpaceAuditWorker] = None
 
         # Cache for compiled excludes (used by deletion safety checks)
         self._ex_cache_raw: Optional[str] = None
         self._ex_cache: tuple[set[str], list[str]] = (set(), [])
         self.allowed_roots: list[Path] = []
+
+    def _set_monitor_mode(self, mode: str) -> None:
+        self._monitor_mode = mode
+        self.monitor_start_btn.setEnabled(mode == "stopped")
+        self.monitor_pause_btn.setEnabled(mode == "running")
+        self.monitor_resume_btn.setEnabled(mode == "paused")
+        self.set_status(f"Space monitor is now {mode} (read-only).")
+
+    def _on_monitor_spike_selection_changed(self) -> None:
+        self.open_evidence_btn.setEnabled(bool(self.monitor_spikes_table.selectedItems()))
+
+    def _open_selected_evidence_bundle(self) -> None:
+        row = self.monitor_spikes_table.currentRow()
+        if row < 0 or row >= len(self._monitor_spike_events):
+            return
+        evidence_path = self._monitor_spike_events[row].get("evidence_bundle")
+        if not evidence_path:
+            QMessageBox.information(self, "No evidence bundle", "No evidence bundle is available for this spike event.")
+            return
+        self.reveal_in_explorer(str(evidence_path))
+
+    def _refresh_monitor_panel(self, snapshot: dict, top_offenders: list[dict], diff_summaries: list[dict]) -> None:
+        if self._monitor_mode != "running":
+            return
+        volume = snapshot.get("volume", {}) if isinstance(snapshot, dict) else {}
+        free_b = int(volume.get("free_bytes", 0))
+        used_b = int(volume.get("used_bytes", 0))
+        self.monitor_free_used_lbl.setText(f"Free/Used: {format_bytes(free_b)} free / {format_bytes(used_b)} used")
+        snapshot_root = ""
+        if isinstance(snapshot, dict):
+            run_info = snapshot.get("run", {})
+            if isinstance(run_info, dict):
+                snapshot_root = str(run_info.get("root", ""))
+        matching_diff = next(
+            (
+                item
+                for item in diff_summaries
+                if isinstance(item, dict) and (not snapshot_root or str(item.get("root", "")) == snapshot_root)
+            ),
+            None,
+        )
+        delta_b = int(matching_diff.get("net_change_bytes", 0)) if isinstance(matching_diff, dict) else 0
+        self.monitor_delta_lbl.setText(f"Recent delta: {format_bytes(abs(delta_b))} {'growth' if delta_b >= 0 else 'drop'}")
+        self._monitor_deltas.append(delta_b)
+        self._monitor_deltas = self._monitor_deltas[-30:]
+        self.monitor_sparkline.clear()
+        for i, v in enumerate(self._monitor_deltas):
+            self.monitor_sparkline.append(i, float(v))
+        self.monitor_spark_chart.createDefaultAxes()
+        threshold_b = int(self.monitor_trigger_spin.value()) * 1024 * 1024
+        if abs(delta_b) >= threshold_b:
+            self.monitor_alert_lbl.setText("Alert state: Spike detected")
+            self.monitor_alert_lbl.setStyleSheet("QLabel { color: #b22222; font-weight: 700; }")
+            suspects = ", ".join(str(row.get("path", "")) for row in top_offenders[:3]) or "n/a"
+            event = {
+                "severity": "high" if abs(delta_b) >= threshold_b * 2 else "medium",
+                "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "delta": delta_b,
+                "suspects": suspects,
+                "evidence_bundle": self.report_dir / "space_snapshot.json",
+            }
+            self._monitor_spike_events.insert(0, event)
+            self._monitor_spike_events = self._monitor_spike_events[: max(1, self.monitor_retention_spin.value() * 5)]
+            self.monitor_spikes_table.setRowCount(len(self._monitor_spike_events))
+            for row_idx, row in enumerate(self._monitor_spike_events):
+                self.monitor_spikes_table.setItem(row_idx, 0, QTableWidgetItem(str(row["severity"])))
+                self.monitor_spikes_table.setItem(row_idx, 1, QTableWidgetItem(str(row["time"])))
+                self.monitor_spikes_table.setItem(row_idx, 2, QTableWidgetItem(format_bytes(abs(int(row["delta"])))))
+                self.monitor_spikes_table.setItem(row_idx, 3, QTableWidgetItem(str(row["suspects"])))
+                self.monitor_spikes_table.setItem(row_idx, 4, QTableWidgetItem(str(row["evidence_bundle"])))
+        else:
+            self.monitor_alert_lbl.setText("Alert state: Normal")
+            self.monitor_alert_lbl.setStyleSheet("QLabel { color: #1f7a1f; font-weight: 700; }")
 
     # ----------------------------
     # UI helpers
@@ -1186,21 +1429,6 @@ class MainWindow(QMainWindow):
 
         return None
 
-    def _is_under_any_root(self, path: Path) -> bool:
-        rp = path.resolve()
-        for root in self.allowed_roots:
-            rr = root.resolve()
-            if rp == rr or rr in rp.parents:
-                return True
-        return False
-
-    def _matches_protected_denylist(self, path: str) -> Optional[str]:
-        ps = os.path.normcase(os.path.normpath(os.path.expandvars(path)))
-        for pref in PROTECTED_PATH_DENYLIST:
-            n = os.path.normcase(os.path.normpath(os.path.expandvars(pref)))
-            if ps == n or ps.startswith(n + os.sep):
-                return n
-        return None
 
     # ----------------------------
     # Scan control
@@ -1299,6 +1527,108 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.cancel("user_cancelled")
             self.set_status("Cancel requested…")
+        if self.space_audit_worker:
+            self.space_audit_worker.cancel_run("user_cancelled")
+            self.set_status("Disk usage analysis cancellation requested…")
+
+    def start_space_audit(self) -> None:
+        root_a_txt = self.root_edit.text().strip()
+        if not root_a_txt:
+            QMessageBox.warning(self, "Missing root", "Please choose Root A first.")
+            return
+        roots: list[Path] = [Path(root_a_txt)]
+        if self.compare_mode_chk.isChecked() and self.root2_edit.text().strip():
+            roots.append(Path(self.root2_edit.text().strip()))
+        roots = [r for r in roots if r.exists()]
+        if not roots:
+            QMessageBox.warning(self, "Invalid root", "No valid root path is available for analysis.")
+            return
+        excludes = {s.strip() for s in (self.exclude_edit.text() or "").split(",") if s.strip()}
+        if not excludes:
+            excludes = set(DEFAULT_EXCLUDES)
+        if not self.report_dir or self.report_dir == self.reports_root:
+            self.report_dir = self._make_run_report_dir(self._reports_root_dir(), roots[0])
+        safe_mkdir(self.report_dir)
+
+        self.start_btn.setEnabled(False)
+        self.space_audit_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.progress.setRange(0, 0)
+        self.set_status("Starting disk usage analysis…")
+        if self._monitor_mode == "stopped":
+            self._set_monitor_mode("running")
+
+        self.space_audit_thread = QThread()
+        self.space_audit_worker = SpaceAuditWorker(
+            roots=roots,
+            report_dir=self.report_dir,
+            excludes=excludes,
+            policy_path=Path(DEFAULT_TOML),
+        )
+        self.space_audit_worker.moveToThread(self.space_audit_thread)
+        self.space_audit_thread.started.connect(self.space_audit_worker.run)
+        self.space_audit_worker.status.connect(self.set_status)
+        self.space_audit_worker.metrics.connect(self.on_metrics)
+        self.space_audit_worker.progress.connect(self.on_progress)
+        self.space_audit_worker.finished.connect(self.on_space_audit_finished)
+        self.space_audit_worker.error.connect(self.on_space_audit_error)
+        self.space_audit_thread.start()
+
+    @Slot(object)
+    def on_space_audit_finished(self, result_obj: object) -> None:
+        if self.space_audit_thread:
+            self.space_audit_thread.quit()
+            self.space_audit_thread.wait()
+        self.start_btn.setEnabled(True)
+        self.space_audit_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        result = result_obj if isinstance(result_obj, dict) else {}
+        if result.get("cancelled"):
+            self.set_status("Disk usage analysis cancelled.")
+        else:
+            offenders = result.get("top_offenders", [])
+            warnings = result.get("warnings", [])
+            diffs = result.get("diff_summaries", [])
+            net = sum(int(d.get("net_change_bytes", 0)) for d in diffs)
+            top_lines = "\n".join(
+                f"• {row.get('root')} :: {row.get('path')} — {format_bytes(int(row.get('bytes', 0)))}"
+                for row in offenders[:5]
+            ) or "• none"
+            warn_line = f"{len(warnings)} protected/skipped entries recorded."
+            summary = (
+                "Disk usage analysis complete.\n\n"
+                f"Top offenders:\n{top_lines}\n\n"
+                f"Net change vs previous snapshot: {format_bytes(net)}\n"
+                f"Warnings/skipped protected areas: {warn_line}\n\n"
+                f"Artifacts: {self.report_dir}"
+            )
+            self.log(summary)
+            snapshots = result.get("snapshots", [])
+            if snapshots:
+                self._refresh_monitor_panel(
+                    snapshot=snapshots[-1],
+                    top_offenders=offenders if isinstance(offenders, list) else [],
+                    diff_summaries=diffs if isinstance(diffs, list) else [],
+                )
+            QMessageBox.information(self, "Disk usage analysis", summary)
+        self.space_audit_worker = None
+        self.space_audit_thread = None
+
+    @Slot(str)
+    def on_space_audit_error(self, err: str) -> None:
+        if self.space_audit_thread:
+            self.space_audit_thread.quit()
+            self.space_audit_thread.wait()
+        self.start_btn.setEnabled(True)
+        self.space_audit_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        QMessageBox.critical(self, "Disk usage analysis error", err)
+        self.space_audit_worker = None
+        self.space_audit_thread = None
 
     @Slot(int, int)
     def on_progress(self, cur: int, total: int) -> None:
@@ -1657,24 +1987,17 @@ class MainWindow(QMainWindow):
 
         for p in delete_paths:
             try:
-                p_obj = Path(p)
-                if not self._is_under_any_root(p_obj):
-                    failed.append((p, "Path is outside selected scan roots"))
+                perm = evaluate_delete_permission(
+                    p, mode=mode, action_type="delete", safe_roots=self.allowed_roots
+                )
+                if not bool(perm.get("allow")):
+                    reason = str(perm.get("reason", "Blocked by protection policy"))
+                    code = str(perm.get("reason_code", "policy_deny"))
+                    failed.append((p, reason))
                     append_prune_event(
                         self.report_dir,
                         make_audit_event(
-                            self.session_id, "delete", p, "blocked", "outside_allowed_roots"
-                        ),
-                    )
-                    continue
-
-                deny = self._matches_protected_denylist(p)
-                if deny:
-                    failed.append((p, f"Protected denylist path: {deny}"))
-                    append_prune_event(
-                        self.report_dir,
-                        make_audit_event(
-                            self.session_id, "delete", p, "blocked", f"protected_path:{deny}"
+                            self.session_id, "delete", p, "blocked", f"{code}:{reason}"
                         ),
                     )
                     continue

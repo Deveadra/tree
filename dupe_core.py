@@ -14,7 +14,7 @@ import sqlite3
 import time
 import uuid
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from config.excludes_loader import load_exclude_prefixes
 from config.path_rules import canonicalize_path, evaluate_rules, validate_rule_inputs
 from dataclasses import dataclass
@@ -80,6 +80,23 @@ PROTECTED_PATH_DENYLIST: tuple[str, ...] = (
     r"C:\System Volume Information",
     r"\\?\GLOBALROOT",
 )
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+SCAN_ERROR_BUDGET_DEFAULT = _env_int("DUPE_SCAN_ERROR_BUDGET", 1000)
+SCAN_TREE_DEPTH_CAP_DEFAULT = _env_int("DUPE_SCAN_TREE_DEPTH_CAP", 256)
+SCAN_PROFILE_DEFAULT = _env_bool("DUPE_SCAN_PROFILE", False)
 
 
 # ----------------------------
@@ -352,7 +369,7 @@ def apply_prune_plan(
     if require_confirmation and confirmation_token != expected:
         raise ValueError(f"Confirmation token required: '{expected}'")
 
-    if destination_dir is not None and not _is_writable_dir(destination_dir):
+    if not dry_run and destination_dir is not None and not _is_writable_dir(destination_dir):
         raise RuntimeError(f"Destination is not writable: {destination_dir}")
 
     results: list[ApplyResult] = []
@@ -533,6 +550,9 @@ def _scan_root_append_to_con(
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
     rule_trace: Optional[list[str]] = None,
+    error_budget: int = SCAN_ERROR_BUDGET_DEFAULT,
+    max_depth: int = SCAN_TREE_DEPTH_CAP_DEFAULT,
+    profile: bool = SCAN_PROFILE_DEFAULT,
 ) -> dict:
     """
     Walk root and insert file rows into SQLite.
@@ -564,6 +584,10 @@ def _scan_root_append_to_con(
     indexed = 0
     skipped = 0
     errors = 0
+    dirs_visited = 0
+    bytes_observed = 0
+    depth_skipped = 0
+    err_budget_exhausted = False
 
     batch: list[tuple[str, str, int, float, int, Optional[int], Optional[int], Optional[float], Optional[int], str, str]] = []
     last_emit = 0.0
@@ -582,6 +606,9 @@ def _scan_root_append_to_con(
                     "indexed": indexed,
                     "skipped": skipped,
                     "errors": errors,
+                    "dirs_visited": dirs_visited,
+                    "bytes_observed": bytes_observed,
+                    "depth_skipped": depth_skipped,
                     "rate_files_per_s": rate,
                     "elapsed_s": elapsed,
                     "eta_s": None,
@@ -594,12 +621,12 @@ def _scan_root_append_to_con(
             )
             last_emit = now
 
-    stack: list[Path] = [root]
+    stack: deque[tuple[Path, int]] = deque([(root, 0)])
     root_resolved = root.resolve()
     emit(force=True)
 
     while stack and not cancel_flag():
-        d = stack.pop()
+        d, depth = stack.pop()
 
         # Skip excluded directory prefix
         if is_under_any_prefix(d, exclude_prefixes):
@@ -612,6 +639,7 @@ def _scan_root_append_to_con(
             continue
 
         try:
+            dirs_visited += 1
             with os.scandir(d) as it:
                 for entry in it:
                     if cancel_flag():
@@ -642,7 +670,10 @@ def _scan_root_append_to_con(
                             # Avoid following reparse points unless explicitly allowed
                             if not follow_symlinks and is_reparse_point(p):
                                 continue
-                            stack.append(p)
+                            if depth + 1 > max_depth:
+                                depth_skipped += 1
+                                continue
+                            stack.append((p, depth + 1))
                             continue
 
                         if entry.is_file(follow_symlinks=follow_symlinks):
@@ -650,6 +681,7 @@ def _scan_root_append_to_con(
                             try:
                                 st = entry.stat(follow_symlinks=follow_symlinks)
                                 size = int(st.st_size)
+                                bytes_observed += size
                                 if size < min_size:
                                     skipped += 1
                                 else:
@@ -673,6 +705,9 @@ def _scan_root_append_to_con(
                             except (PermissionError, FileNotFoundError, OSError) as e:
                                 errors += 1
                                 log_err("FILE_STAT", entry.path, e)
+                                if errors >= error_budget:
+                                    err_budget_exhausted = True
+                                    break
 
                             if len(batch) >= 5000:
                                 con.executemany(
@@ -687,11 +722,19 @@ def _scan_root_append_to_con(
                     except (PermissionError, FileNotFoundError, OSError) as e:
                         errors += 1
                         log_err("ENTRY", entry.path, e)
+                        if errors >= error_budget:
+                            err_budget_exhausted = True
+                            break
                         continue
+                if err_budget_exhausted:
+                    break
 
         except (PermissionError, FileNotFoundError, OSError) as e:
             errors += 1
             log_err("DIR", str(d), e)
+            if errors >= error_budget:
+                err_budget_exhausted = True
+                break
             continue
 
     if batch:
@@ -710,7 +753,23 @@ def _scan_root_append_to_con(
     except Exception:
         pass
 
-    return {"listed": listed, "indexed": indexed, "skipped": skipped, "errors": errors}
+    elapsed_s = time.time() - t0
+    if profile:
+        print(
+            f"[scan-profile] root={root} listed={listed} dirs={dirs_visited} bytes={bytes_observed} elapsed_s={elapsed_s:.3f} errors={errors}"
+        )
+
+    return {
+        "listed": listed,
+        "indexed": indexed,
+        "skipped": skipped,
+        "errors": errors,
+        "dirs_visited": dirs_visited,
+        "bytes_observed": bytes_observed,
+        "elapsed_s": elapsed_s,
+        "depth_skipped": depth_skipped,
+        "error_budget_exhausted": err_budget_exhausted,
+    }
 
 
 def scan_roots_to_db(
@@ -747,7 +806,17 @@ def scan_roots_to_db(
         _db_create_schema(con)
 
         per_root: list[dict] = []
-        combined = {"listed": 0, "indexed": 0, "skipped": 0, "errors": 0}
+        combined = {
+            "listed": 0,
+            "indexed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "dirs_visited": 0,
+            "bytes_observed": 0,
+            "elapsed_s": 0.0,
+            "depth_skipped": 0,
+            "error_budget_exhausted": 0,
+        }
 
         for rid, r in enumerate(roots):
             if resume_root_id >= 0 and rid <= resume_root_id:
