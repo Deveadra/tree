@@ -61,25 +61,25 @@ from PySide6.QtWidgets import (
     QComboBox,
 )
 
+from core.service import (
+    apply_prune,
+    load_dupes,
+    plan_prune,
+    scan_to_db,
+    write_reports,
+)
 from dupe_core import (
-    analyze_path_prefixes,
     append_prune_event,
     compile_excludes,
     DEFAULT_EXCLUDES,
     DupeGroup,
     FileRec,
-    find_dupes_from_db,
     fmt_duration,
     fmt_time,
     format_bytes,
     safe_mkdir,
-    scan_root_to_db,
-    scan_roots_to_db,
     write_json_atomic,
-    write_live_reports,
     windows_recycle,
-    write_scan_reports,
-    write_path_suggestions,
 )
 
 
@@ -174,14 +174,13 @@ class ScanWorker(QObject):
             self.progress.emit(0, 0)
 
             if self.compare_mode and len(self.roots) >= 2:
-                scan_stats_full = scan_roots_to_db(
-                    db_path=db_path,
+                scan_stats_full = scan_to_db(
                     roots=self.roots,
+                    db_path=db_path,
                     excludes=self.excludes,
                     follow_symlinks=self.follow_symlinks,
                     min_size=self.min_size,
-                    cancel_flag=self._cancel_flag,
-                    metrics_cb=push,
+                    compare_mode=True,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
                 )
                 scan_stats = scan_stats_full.get("combined") or {
@@ -192,14 +191,13 @@ class ScanWorker(QObject):
                 }
                 meta["scan_stats_full"] = scan_stats_full
             else:
-                scan_stats = scan_root_to_db(
+                scan_stats = scan_to_db(
+                    roots=[self.roots[0]],
                     db_path=db_path,
-                    root=self.roots[0],
                     excludes=self.excludes,
                     follow_symlinks=self.follow_symlinks,
                     min_size=self.min_size,
-                    cancel_flag=self._cancel_flag,
-                    metrics_cb=push,
+                    compare_mode=False,
                     scan_error_log_path=self.report_dir / "scan_errors.txt",
                 )
 
@@ -260,7 +258,7 @@ class ScanWorker(QObject):
                 except Exception:
                     pass
 
-            dupes = find_dupes_from_db(
+            dupes = load_dupes(
                 db_path=db_path,
                 cancel_flag=self._cancel_flag,
                 metrics_cb=push,
