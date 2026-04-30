@@ -57,3 +57,19 @@ def test_evidence_includes_export_tiers_and_redaction_policy() -> None:
     assert evidence["redaction_policy"]["usernames"] == "hash"
     assert "share_safe_redacted_report" in evidence["export_tiers"]
     assert evidence["external_model_provider_usage"][0]["consent_state"]["provider_enabled"] is False
+    assert evidence["report_redaction_level"] == "full"
+    assert evidence["export_tiers"]["share_safe_redacted_report"]["payload"]["report_redaction_level"] == "share_safe"
+
+
+def test_schema_rejects_malformed_evidence_timestamp() -> None:
+    with pytest.raises(ValueError):
+        validate_evidence_schema(
+            {
+                "schema_version": "1.0",
+                "space_audit_snapshot_features": [{"provenance": {"source_file": "a", "run_id": "r", "event_id": "e", "timestamp": "bad-ts"}}],
+                "monitor_timeline_features": [],
+                "protection_policy_state": [],
+                "user_notes_context": [],
+                "external_model_provider_usage": [],
+            }
+        )

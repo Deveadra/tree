@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.ai.action_catalog import build_action_step, order_steps
-from core.ai.prompt_security import build_strict_prompt_template, validate_allowlisted_schema
+from core.ai.prompt_security import build_strict_prompt_template, sanitize_untrusted_text, validate_allowlisted_schema
 
 
 @dataclass(frozen=True)
@@ -125,6 +125,44 @@ def _offline_summary(rec: dict[str, Any], route: str) -> str:
     )
 
 
+def _sanitize_evidence_link(value: Any) -> str | None:
+    text = sanitize_untrusted_text(str(value) if value is not None else "").strip()
+    if not text:
+        return None
+    if not (text.startswith("http://") or text.startswith("https://")):
+        return None
+    return text[:500]
+
+
+def _build_explanation_payload(candidate: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any]:
+    raw_links = candidate.get("evidence_links")
+    links: list[str] = []
+    if isinstance(raw_links, list):
+        for link in raw_links:
+            sanitized = _sanitize_evidence_link(link)
+            if sanitized:
+                links.append(sanitized)
+
+    alternate = candidate.get("alternate_hypotheses")
+    alt_list = [sanitize_untrusted_text(str(h))[:300] for h in alternate] if isinstance(alternate, list) else []
+
+    return {
+        "summary": _default_summary(rec),
+        "feature_evidence_links": links,
+        "alternate_hypotheses": alt_list,
+    }
+
+
+def _build_approval_workflow(action_steps: list[dict[str, Any]]) -> dict[str, Any]:
+    irreversible_tokens = [s.get("confirmation_token") for s in action_steps if s.get("requires_confirmation_token")]
+    return {
+        "state": "draft",
+        "allowed_states": ["draft", "pending_approval", "approved", "handoff_blocked", "handoff_ready", "completed"],
+        "requires_explicit_confirmation_before_handoff": True,
+        "required_confirmation_tokens": [t for t in irreversible_tokens if isinstance(t, str) and t],
+    }
+
+
 def build_recommendations(
     evidence: dict[str, Any],
     *,
@@ -192,6 +230,19 @@ def build_recommendations(
                 "policy": dict(redaction_policy),
             },
         }
+
+        rec["explanation_payload"] = _build_explanation_payload(candidate, rec)
+        rec["action_plan"] = {
+            "schema_version": "1.0",
+            "guardrails": {
+                "requires_precheck": True,
+                "rollback_steps_required": True,
+                "expected_gain_range_required": True,
+            },
+            "steps": rec["action_steps"],
+        }
+        rec["approval_workflow"] = _build_approval_workflow(rec["action_steps"])
+        rec["handoff_ready"] = rec["approval_workflow"]["state"] == "handoff_ready"
 
         route = execution_config.model_routing.get(str(candidate.get("task_type", "risk_assessment")), "local")
         rec["model_route"] = route
