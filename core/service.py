@@ -11,7 +11,7 @@ from core.actions import build_prune_plan, execute_prune_plan
 from core.hash_index import find_duplicates as hash_find_duplicates
 from core.models import DuplicateResultGroup, ScanRequest
 from core.protection_policy import evaluate_delete_permission
-from core.space_audit import sample_free_space_timeline
+from core.space_audit import sample_correlated_space_timeline, sample_free_space_timeline
 from config.protection_loader import DEFAULT_TOML, resolve_protection_config
 from dupe_core import (
     DupeGroup,
@@ -129,6 +129,30 @@ def run_free_space_watchdog(
         duration_seconds=duration_seconds,
         max_rows=max_rows,
         free_space_drop_spike_threshold_bytes=spike_threshold_bytes,
+        cancel_flag=cancel_flag,
+    )
+
+
+def run_correlated_space_watchdog(
+    root: Path,
+    report_dir: Path,
+    fast_interval_seconds: float,
+    growth_interval_seconds: float,
+    duration_seconds: float | None,
+    max_fast_rows: int | None,
+    max_growth_rows: int | None,
+    cancel_flag: Any | None = None,
+) -> dict[str, Any]:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    return sample_correlated_space_timeline(
+        root=root,
+        output_fast_csv=report_dir / "free_space_timeline_fast.csv",
+        output_growth_csv=report_dir / "space_growth_timeline.csv",
+        fast_interval_seconds=fast_interval_seconds,
+        growth_interval_seconds=growth_interval_seconds,
+        duration_seconds=duration_seconds,
+        max_fast_rows=max_fast_rows,
+        max_growth_rows=max_growth_rows,
         cancel_flag=cancel_flag,
     )
 
