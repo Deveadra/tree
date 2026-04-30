@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+import csv
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 import errno
 import os
+import time
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix
@@ -379,4 +381,92 @@ __all__ = [
     "summarize_by_extension",
     "diff_space_snapshots",
     "write_space_reports",
+    "sample_free_space_timeline",
 ]
+
+
+def sample_free_space_timeline(
+    root: str | Path,
+    output_csv: str | Path,
+    interval_seconds: float = 1.0,
+    duration_seconds: float | None = None,
+    max_rows: int | None = None,
+    free_space_drop_spike_threshold_bytes: int | None = None,
+    cancel_flag: Any | None = None,
+) -> dict[str, Any]:
+    """Periodically capture free-space metrics into CSV.
+
+    This sampler is read-only and only relies on os.statvfs for volume stats.
+    """
+    root_path = Path(root).expanduser().resolve()
+    out_path = Path(output_csv)
+    safe_mkdir(out_path.parent)
+
+    started_at = time.time()
+    rows_written = 0
+    previous_free: int | None = None
+    spikes: list[dict[str, Any]] = []
+    cancelled = False
+
+    with out_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "timestamp",
+            "total_bytes",
+            "free_bytes",
+            "used_bytes",
+            "free_delta_bytes",
+            "spike",
+        ])
+        handle.flush()
+        os.fsync(handle.fileno())
+
+        while True:
+            if cancel_flag is not None and getattr(cancel_flag, "is_set", lambda: False)():
+                cancelled = True
+                break
+            if duration_seconds is not None and (time.time() - started_at) >= duration_seconds:
+                break
+            if max_rows is not None and rows_written >= max_rows:
+                break
+
+            statvfs = os.statvfs(root_path)
+            total = int(statvfs.f_blocks * statvfs.f_frsize)
+            free = int(statvfs.f_bavail * statvfs.f_frsize)
+            used = max(0, total - free)
+            delta = 0 if previous_free is None else int(free - previous_free)
+            spike = False
+            if (
+                previous_free is not None
+                and free_space_drop_spike_threshold_bytes is not None
+                and delta < 0
+                and abs(delta) >= int(free_space_drop_spike_threshold_bytes)
+            ):
+                spike = True
+                spikes.append(
+                    {
+                        "timestamp": _utc_now_iso(),
+                        "free_delta_bytes": delta,
+                        "free_bytes": free,
+                        "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
+                    }
+                )
+
+            writer.writerow([_utc_now_iso(), total, free, used, delta, int(spike)])
+            handle.flush()
+            os.fsync(handle.fileno())
+
+            previous_free = free
+            rows_written += 1
+            time.sleep(max(0.0, float(interval_seconds)))
+
+    return {
+        "root": str(root_path),
+        "output_csv": str(out_path),
+        "rows_written": rows_written,
+        "cancelled": cancelled,
+        "duration_seconds": float(time.time() - started_at),
+        "spike_count": len(spikes),
+        "spikes": spikes,
+        "mode": "watchdog_read_only",
+    }

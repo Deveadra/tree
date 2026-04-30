@@ -48,6 +48,15 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--exclude", action="append", default=[])
     add_common(r)
 
+    w = sub.add_parser("watchdog", help="Sample free-space timeline (read-only)")
+    w.add_argument("root", type=Path)
+    w.add_argument("--report-dir", default="reports")
+    w.add_argument("--interval", type=float, default=1.0)
+    w.add_argument("--duration", type=float, default=None)
+    w.add_argument("--max-rows", type=int, default=None)
+    w.add_argument("--spike-threshold-bytes", type=int, default=None)
+    w.add_argument("--json", action="store_true", dest="as_json")
+
     return p
 
 
@@ -116,6 +125,27 @@ def main() -> int:
         stats = {"dupe_groups": len(groups)}
         service.write_reports(Path(args.report_dir), groups, stats, set(args.exclude))
         _emit({"report_dir": args.report_dir, "dupe_groups": len(groups)}, args.as_json)
+        return 0
+
+    if args.cmd == "watchdog":
+        try:
+            payload = service.run_free_space_watchdog(
+                root=args.root,
+                report_dir=Path(args.report_dir),
+                interval_seconds=args.interval,
+                duration_seconds=args.duration,
+                max_rows=args.max_rows,
+                spike_threshold_bytes=args.spike_threshold_bytes,
+                cancel_flag=None,
+            )
+        except KeyboardInterrupt:
+            payload = {
+                "root": str(args.root),
+                "output_csv": str(Path(args.report_dir) / "free_space_timeline.csv"),
+                "cancelled": True,
+                "mode": "watchdog_read_only",
+            }
+        _emit(payload, args.as_json)
         return 0
 
     return 1
