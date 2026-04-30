@@ -545,6 +545,41 @@ def _write_text_atomic(path: Path, text: str) -> None:
     os.replace(tmp_path, path)
 
 
+def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
+    """Learn normal free-space oscillation for a volume and return threshold profile."""
+    samples = max(2, int(duration_minutes * 60))
+    previous_free: int | None = None
+    deltas: list[int] = []
+    for _ in range(samples):
+        statvfs = os.statvfs(Path(volume))
+        free = int(statvfs.f_bavail * statvfs.f_frsize)
+        if previous_free is not None:
+            deltas.append(abs(int(free - previous_free)))
+        previous_free = free
+        time.sleep(0.0)
+
+    if deltas:
+        sorted_deltas = sorted(deltas)
+        median_noise = sorted_deltas[len(sorted_deltas) // 2]
+        p90_noise = sorted_deltas[int((len(sorted_deltas) - 1) * 0.9)]
+        max_noise = sorted_deltas[-1]
+    else:
+        median_noise = p90_noise = max_noise = 0
+
+    minor_band = int(max(1, p90_noise))
+    significant_drop = int(max(minor_band + 1, max(minor_band * 2, median_noise * 3)))
+    critical_drop = int(max(significant_drop + 1, max(significant_drop * 2, max_noise * 4)))
+
+    return {
+        "calibrated_at": _utc_now_iso(),
+        "duration_minutes": float(duration_minutes),
+        "sample_count": len(deltas),
+        "minor_fluctuation_band_bytes": minor_band,
+        "significant_drop_threshold_bytes": significant_drop,
+        "critical_drop_threshold_bytes": critical_drop,
+    }
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "scan_space_usage",
@@ -573,6 +608,21 @@ def sample_free_space_timeline(
     root_path = Path(root).expanduser().resolve()
     out_path = Path(output_csv)
     safe_mkdir(out_path.parent)
+    baseline_path = out_path.parent / "space_watch_baseline.json"
+    volume_key = str(root_path)
+
+    if baseline_path.exists():
+        baseline_profiles = json.loads(baseline_path.read_text(encoding="utf-8"))
+    else:
+        baseline_profiles = {}
+    if volume_key not in baseline_profiles:
+        baseline_profiles[volume_key] = calibrate_baseline(volume=volume_key, duration_minutes=0.05)
+        write_json_atomic(baseline_path, baseline_profiles)
+
+    profile = baseline_profiles[volume_key]
+    minor_band = int(profile["minor_fluctuation_band_bytes"])
+    significant_drop = int(profile["significant_drop_threshold_bytes"])
+    critical_drop = int(profile["critical_drop_threshold_bytes"])
 
     started_at = time.time()
     rows_written = 0
@@ -608,19 +658,17 @@ def sample_free_space_timeline(
             used = max(0, total - free)
             delta = 0 if previous_free is None else int(free - previous_free)
             spike = False
-            if (
-                previous_free is not None
-                and free_space_drop_spike_threshold_bytes is not None
-                and delta < 0
-                and abs(delta) >= int(free_space_drop_spike_threshold_bytes)
-            ):
+            threshold = int(free_space_drop_spike_threshold_bytes) if free_space_drop_spike_threshold_bytes is not None else significant_drop
+            if previous_free is not None and delta < 0 and abs(delta) > minor_band and abs(delta) >= threshold:
                 spike = True
+                severity = "critical" if abs(delta) >= critical_drop else "significant"
                 spikes.append(
                     {
                         "timestamp": _utc_now_iso(),
                         "free_delta_bytes": delta,
                         "free_bytes": free,
-                        "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
+                        "threshold_bytes": threshold,
+                        "severity": severity,
                     }
                 )
 
@@ -640,5 +688,7 @@ def sample_free_space_timeline(
         "duration_seconds": float(time.time() - started_at),
         "spike_count": len(spikes),
         "spikes": spikes,
+        "baseline_profile": profile,
+        "baseline_profile_path": str(baseline_path),
         "mode": "watchdog_read_only",
     }
