@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+import hashlib
+import json
 
 from dupe_core import safe_mkdir, write_json_atomic
 
@@ -14,6 +16,10 @@ from core.ai.prompt_security import sanitize_untrusted_text
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def _evidence_payload_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 
@@ -128,7 +134,7 @@ def build_evidence_from_space_outputs(
             "used_bytes": int(volume.get("used_bytes", 0)),
             "free_delta_bytes": int(space_watch_output.get("free_delta_bytes", 0)),
         }
-    return build_normalized_evidence(
+    evidence = build_normalized_evidence(
         run_id=run_id,
         event_id=event_id,
         disk_metrics_payload=disk_metrics,
@@ -142,6 +148,30 @@ def build_evidence_from_space_outputs(
         user_context={"space_watch_event": event_id},
         consent_state=dict(space_watch_output.get("consent_state", {})),
     )
+    incidents = space_watch_output.get("incidents", [])
+    cross_volume = [i for i in incidents if isinstance(i, dict) and i.get("volume_id")]
+    if cross_volume:
+        by_volume: dict[str, list[dict[str, Any]]] = {}
+        for item in cross_volume:
+            vol = str(item.get("volume_id"))
+            by_volume.setdefault(vol, []).append(item)
+        evidence["cross_volume_incident_correlation"] = {
+            "volumes": sorted(by_volume.keys()),
+            "incident_count": len(cross_volume),
+            "incidents_by_volume": by_volume,
+        }
+    timeline = space_watch_output.get("timeline_events", [])
+    evidence["unified_case_timeline"] = [e for e in timeline if isinstance(e, dict)]
+    evidence["evidence_hash"] = _evidence_payload_hash(
+        {
+            "run_id": run_id,
+            "event_id": event_id,
+            "disk_metrics": disk_metrics,
+            "space_audit_output": space_audit_output,
+            "space_watch_output": space_watch_output,
+        }
+    )
+    return evidence
 
 
 def persist_normalized_evidence(case_or_run_dir: str | Path, evidence: dict[str, Any]) -> Path:

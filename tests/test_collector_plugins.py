@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from core.collector_plugins import CollectorPlugin, CollectorPluginMetadata, run_plugins_safely
+from core.collector_plugins import (
+    CollectorPlugin,
+    CollectorPluginMetadata,
+    ProviderCollectorPlugin,
+    run_plugins_safely,
+    run_provider_collectors_safely,
+)
 
 
 def test_plugin_metadata_and_sandboxed_failures(tmp_path: Path):
@@ -36,3 +42,20 @@ def test_plugin_metadata_and_sandboxed_failures(tmp_path: Path):
     second = payload["plugins"][1]
     assert second["status"] == "failed"
     assert second["error"]["type"] == "RuntimeError"
+
+
+def test_provider_collectors_include_provider_name(tmp_path: Path):
+    provider = ProviderCollectorPlugin(
+        provider="cloud",
+        metadata=CollectorPluginMetadata(
+            capability_name="provider cache collector",
+            overhead_estimate="low",
+            permission_requirements=["read filesystem metadata"],
+        ),
+        supported_platforms=("linux",),
+        is_available=lambda: True,
+        collect=lambda root: {"root": str(root), "ok": True},
+    )
+    payload = run_provider_collectors_safely(tmp_path, [provider])
+    assert payload["provider_collectors"][0]["provider"] == "cloud"
+    assert payload["provider_collectors"][0]["status"] == "ok"

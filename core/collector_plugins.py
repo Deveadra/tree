@@ -21,6 +21,14 @@ class CollectorPlugin:
     collect: Callable[[Path], dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class ProviderCollectorPlugin:
+    provider: str
+    metadata: CollectorPluginMetadata
+    supported_platforms: tuple[str, ...]
+    is_available: Callable[[], bool]
+    collect: Callable[[Path], dict[str, Any]]
+
 
 def _platform_tag() -> str:
     return platform.system().lower()
@@ -132,3 +140,24 @@ def run_plugins_safely(root: Path, plugins: list[CollectorPlugin] | None = None)
             entry["error"] = {"type": type(exc).__name__, "message": str(exc)}
         out.append(entry)
     return {"plugins": out}
+
+
+def run_provider_collectors_safely(root: Path, provider_plugins: list[ProviderCollectorPlugin]) -> dict[str, Any]:
+    out: list[dict[str, Any]] = []
+    for plugin in provider_plugins:
+        entry = {
+            "provider": plugin.provider,
+            "metadata": {
+                "capability_name": plugin.metadata.capability_name,
+                "overhead_estimate": plugin.metadata.overhead_estimate,
+                "permission_requirements": list(plugin.metadata.permission_requirements),
+            },
+        }
+        try:
+            entry["status"] = "ok"
+            entry["data"] = plugin.collect(root)
+        except Exception as exc:
+            entry["status"] = "failed"
+            entry["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        out.append(entry)
+    return {"provider_collectors": out}

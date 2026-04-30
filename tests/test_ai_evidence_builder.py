@@ -89,10 +89,22 @@ def test_build_evidence_from_space_outputs_and_export_case_files(tmp_path: Path)
             "top_dirs": [{"path": "/data/logs", "delta_bytes": 50}],
             "top_extensions": [{"extension": ".log", "delta_bytes": 50}],
         },
-        space_watch_output={"free_delta_bytes": -50, "process_io": {"enabled": True}, "plugins": {"collector_count": 1}},
+        space_watch_output={
+            "free_delta_bytes": -50,
+            "process_io": {"enabled": True},
+            "plugins": {"collector_count": 1},
+            "incidents": [
+                {"id": "i-1", "volume_id": "vol-a", "severity": "high"},
+                {"id": "i-2", "volume_id": "vol-b", "severity": "medium"},
+            ],
+            "timeline_events": [{"ts": "2026-01-01T00:00:00Z", "event": "watch_alert"}],
+        },
         policy_context_payload={"safe_delete_roots": ["/data/safe"]},
     )
     assert evidence["space_audit_snapshot_features"][1]["top_dir_deltas"][0]["path"] == "/data/logs"
+    assert evidence["cross_volume_incident_correlation"]["incident_count"] == 2
+    assert evidence["unified_case_timeline"][0]["event"] == "watch_alert"
+    assert evidence["evidence_hash"]
 
     case_report, findings_txt = export_ai_case_outputs(
         tmp_path,

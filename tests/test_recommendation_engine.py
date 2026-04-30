@@ -74,6 +74,7 @@ def test_routing_budgets_cache_and_telemetry():
 
     execution = AIExecutionConfig(
         model_routing={"root_cause": "local", "reclaim_opportunity": "cloud"},
+        routing_policy="hybrid",
         token_budget_per_run=2,
         time_budget_ms=10000,
         max_analysis_window=2,
@@ -86,10 +87,36 @@ def test_routing_budgets_cache_and_telemetry():
     assert first["metadata"]["execution"]["model_routing"]["root_cause"] == "local"
     assert first["metadata"]["analysis_window_applied"] == 2
     assert first["metadata"]["telemetry"]["llm_calls"] >= 1
+    assert "cache_hit_rate" in first["metadata"]["telemetry"]
     assert first["recommendations"][0]["analysis_evidence_hash"]
     assert first["recommendations"][0]["model_route"] in {"local", "cloud"}
     assert second["metadata"]["telemetry"]["cache_hits"] >= 1
     assert calls["count"] <= 2
+
+
+def test_provider_routing_policy_forces_local():
+    execution = AIExecutionConfig(
+        model_routing={"root_cause": "cloud", "reclaim_opportunity": "cloud"},
+        routing_policy="local",
+    )
+    out = build_recommendations(_sample_evidence(), execution_config=execution)
+    assert {r["model_route"] for r in out["recommendations"]} == {"local"}
+
+
+def test_chaos_provider_outage_and_partial_evidence_resilience():
+    evidence = {"recommendation_candidates": [{"id": "partial", "title": "Partial", "metrics": {"free_delta_ratio": 0.2}}]}
+
+    def _outage(_rec):
+        raise TimeoutError("provider outage")
+
+    out = build_recommendations(
+        evidence,
+        execution_config=AIExecutionConfig(model_routing={"risk_assessment": "cloud"}, routing_policy="cloud"),
+        rationale_generator=_outage,
+    )
+    rec = out["recommendations"][0]
+    assert rec["rationale_mode"] == "fallback_non_llm"
+    assert out["metadata"]["telemetry"]["failure_modes"]["provider_error"] >= 1
 
 
 def test_recommendations_include_redaction_impact_notes() -> None:
