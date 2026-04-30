@@ -12,67 +12,93 @@ Use `cli.py` with the following subcommands:
 
 All commands support human-readable output by default and machine-readable output with `--json`.
 
-## Safety defaults
+## Claim audit: safety workflow, plan/apply semantics, and rule tracing
 
-- Prune-related operations default to dry-run mode (`plan-prune` and `apply-prune`).
-- To perform destructive prune actions, you must pass **both** `--no-dry-run` and `--yes` to `apply-prune`.
+Legend:
+- **Implemented**: behavior exists in current code and CLI.
+- **Partially implemented**: some behavior exists, but scope is narrower than previously described.
+- **Planned**: intentionally not shipped yet in current CLI/service path.
 
-## Operational playbook: single-root workflow
+### Safety workflow claims
 
-1. Scan one root into the cache:
-   - `python cli.py scan /data/root-a --report-dir reports/single --db reports/single/scan.db`
-2. Inspect duplicate groups:
-   - `python cli.py dupes --db reports/single/scan.db`
-3. Create prune plan (dry-run default):
-   - `python cli.py plan-prune --db reports/single/scan.db --report-dir reports/single`
-4. (Optional) apply prune:
-   - Dry run: `python cli.py apply-prune --plan reports/single/prune_plan.json`
-   - Real apply: `python cli.py apply-prune --plan reports/single/prune_plan.json --no-dry-run --yes`
-5. Write reporting artifacts:
-   - `python cli.py report --db reports/single/scan.db --report-dir reports/single`
+1. **Claim:** Prune-related operations default to dry-run mode (`plan-prune` and `apply-prune`).  
+   **Status:** **Implemented**.  
+   `apply-prune` has `--dry-run` default true, and `plan_prune(...)` emits metadata `dry_run_default: true` in the generated plan.
 
-## Operational playbook: compare-root workflow
+2. **Claim:** Destructive prune requires both `--no-dry-run` and `--yes`.  
+   **Status:** **Implemented**.  
+   `apply_prune(...)` raises `ValueError("Refusing destructive action without --yes")` when `dry_run` is false and `yes` is not passed.
 
-1. Scan two roots in compare mode:
-   - `python cli.py scan /data/root-a /data/root-b --compare --report-dir reports/compare --db reports/compare/scan.db`
-2. Inspect compare-mode dupes:
-   - `python cli.py dupes --db reports/compare/scan.db --compare`
-3. Create prune plan (dry-run default):
-   - `python cli.py plan-prune --db reports/compare/scan.db --compare --report-dir reports/compare`
-4. (Optional) apply prune with explicit confirmation:
-   - `python cli.py apply-prune --plan reports/compare/prune_plan.json --no-dry-run --yes`
-5. Export reports:
-   - `python cli.py report --db reports/compare/scan.db --compare --report-dir reports/compare`
-## Rule processing
+### Plan/apply semantics claims
 
-Deterministic precedence is:
-1. CLI/session overrides (runtime `excludes` inputs)  
-2. User config env overrides (`DUPES_EXCLUDE_*`)  
-3. Global defaults (`config/excludes.toml`)
+3. **Claim:** `plan-prune` constructs plan actions from duplicate groups and writes `prune_plan.json`.  
+   **Status:** **Implemented**.  
+   The CLI loads dupes, calls `service.plan_prune(...)`, and writes to `<report-dir>/prune_plan.json`.
 
-When both include and exclude style patterns apply, **exclude wins**.
+4. **Claim:** `apply-prune` executes plan actions with audit logging support.  
+   **Status:** **Implemented**.  
+   For each action, non-dry-run uses recycle logic and (when `--audit-log` is provided/defaulted) appends JSONL audit events.
 
-## Path normalization
+5. **Claim:** `plan-prune --dry-run/--no-dry-run` affects plan generation semantics.  
+   **Status:** **Partially implemented** (flag currently accepted but not used by planner logic).  
+   The parser accepts the flag for `plan-prune`, but current `service.plan_prune(...)` behavior does not branch on it.
 
-All rule/path matching is funneled through `config.path_rules.canonicalize_path()`, which stores both:
-- `raw`: original user string (for diagnostics)
-- `canonical`: normalized form used for matching
+### Rule tracing and rule-processing claims
 
-## Validation warnings
+6. **Claim:** Deterministic precedence is runtime CLI excludes > env overrides > global defaults.  
+   **Status:** **Partially implemented** in the current CLI path.  
+   Runtime `--exclude` is passed directly into scan/report calls, and separate env/default loading utilities exist; however, current `scan` command does not merge env/default excludes automatically.
 
-The loader emits warnings for:
-- unresolved `%ENV_VAR%` tokens
-- malformed prefixes such as `C:bad`
+7. **Claim:** Include/exclude conflict resolution is “exclude wins.”  
+   **Status:** **Implemented** in `evaluate_rules(...)`.
 
-## Pattern types
+8. **Claim:** Path normalization uses `canonicalize_path()` with `raw` and `canonical` forms.  
+   **Status:** **Implemented**.
 
-Rules support both:
-- simple prefix/path matching
-- glob/pathspec style matching (`*`, `?`, `[]`, `**`)
+9. **Claim:** Validation warnings are emitted for unresolved `%ENV_VAR%` and malformed drive-prefix forms.  
+   **Status:** **Implemented** in validation utility and exclude-loader warning output.
 
-## Rule-hit tracing
+10. **Claim:** Pattern matching supports prefix style and glob/pathspec style (`*`, `?`, `[]`, `**`).  
+    **Status:** **Implemented** via `match_pattern(...)`.
 
-Scan internals can collect a `rule_trace` list from `_scan_root_append_to_con(...)` to explain why directories/items were skipped.
+11. **Claim:** Scan internals collect and expose `rule_trace` from `_scan_root_append_to_con(...)`.  
+    **Status:** **Planned**.  
+    Current public CLI/service flow does not expose a `rule_trace` artifact.
+
+## Current guarantees
+
+Scope: guarantees below describe current shipped behavior of `cli.py` + `core.service` + `config.path_rules` in this repository.
+
+- `apply-prune` is safe-by-default (dry-run unless explicitly overridden).
+- destructive apply is guarded by an explicit confirmation (`--yes`) in addition to disabling dry-run.
+- prune plans are deterministic for a given dupe-group input (newest-by-`mtime` then path retained per group).
+- path-rule matching is case-normalized and slash-normalized before match evaluation.
+- exclude precedence over include is guaranteed where `evaluate_rules(...)` is used.
+
+Limitations:
+
+- `plan-prune` currently accepts dry-run flags but does not change planner behavior.
+- env/default exclude layering is available via config loader utilities but is not yet automatically wired into `scan` CLI exclude resolution.
+- rule-hit trace export is not currently available from the CLI outputs.
+
+## Verified command examples
+
+The following commands were validated against the current CLI interface:
+
+```bash
+# Show top-level CLI commands
+python cli.py --help
+
+# Show plan-prune options
+python cli.py plan-prune --help
+
+# Show apply-prune options (including safety flags)
+python cli.py apply-prune --help
+
+# Dry-run apply against an empty plan (machine-readable)
+printf '{"actions":[]}' > /tmp/empty_plan.json
+python cli.py apply-prune --plan /tmp/empty_plan.json --json
+```
 
 ## Testing
 
