@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 PRIVACY_PATTERNS = [
-    re.compile(r"[A-Za-z]:\\\\Users\\\\", re.IGNORECASE),
+    re.compile(r"[A-Za-z]:(?:\\+|/+)Users(?:\\+|/+)", re.IGNORECASE),
     re.compile(r"/home/"),
     re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
 ]

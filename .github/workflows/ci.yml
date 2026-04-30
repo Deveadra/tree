@@ -85,10 +85,23 @@ jobs:
   release_blocker:
     name: Release blocker (policy/explainability/non-destructive invariants)
     runs-on: ubuntu-latest
+    if: ${{ always() }}
     needs:
       - gate_c_policy_firewall_and_prompt_security
       - gate_d_explainability_and_ranking_repro
       - gate_e_privacy_and_export_hygiene
     steps:
-      - run: |
-          echo "Release is blocked unless Gates C/D/E are green."
+      - name: Enforce Gate C/D/E status
+        run: |
+          echo "Gate C result: ${{ needs.gate_c_policy_firewall_and_prompt_security.result }}"
+          echo "Gate D result: ${{ needs.gate_d_explainability_and_ranking_repro.result }}"
+          echo "Gate E result: ${{ needs.gate_e_privacy_and_export_hygiene.result }}"
+
+          if [ "${{ needs.gate_c_policy_firewall_and_prompt_security.result }}" != "success" ] || \
+             [ "${{ needs.gate_d_explainability_and_ranking_repro.result }}" != "success" ] || \
+             [ "${{ needs.gate_e_privacy_and_export_hygiene.result }}" != "success" ]; then
+            echo "Release blocked: one or more required gates did not succeed."
+            exit 1
+          fi
+
+          echo "Release gates C/D/E are all green."
