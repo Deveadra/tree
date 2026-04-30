@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -118,6 +119,18 @@ class PrunePlanIntegrityTests(unittest.TestCase):
             self.assertEqual(result["blocked_reasons"]["outside_safe_roots"], 1)
             self.assertEqual(mock_recycle.call_count, 1)
             self.assertEqual(mock_event.call_count, 2)
+            denied_event = mock_event.call_args_list[0].args[1]
+            self.assertEqual(denied_event["policy_decision"], "blocked")
+            self.assertEqual(denied_event["policy_reason_code"], "outside_safe_roots")
+            self.assertEqual(denied_event["matched_rule"], "safe_delete_roots")
+
+            report = json.loads((base / "audit" / "policy_block_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["blocked_total"], 1)
+            self.assertEqual(report["blocked_by_reason"]["outside_safe_roots"], 1)
+            self.assertEqual(len(report["blocked_paths_by_reason"]["outside_safe_roots"]), 1)
+            summary_text = (base / "audit" / "prune_summary.txt").read_text(encoding="utf-8")
+            self.assertIn("Policy summary", summary_text)
+            self.assertIn("outside_safe_roots: 1", summary_text)
 
 
 if __name__ == "__main__":

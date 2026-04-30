@@ -189,6 +189,23 @@ def apply_prune(
         "blocked_reasons": {},
         "dry_run": dry_run,
     }
+    blocked_paths_by_reason: dict[str, list[str]] = {}
+    policy_rule_map = {
+        "outside_safe_roots": "safe_delete_roots",
+        "protected_prefix": "protected_prefixes",
+        "protected_dir_name": "protected_dir_names",
+        "unsafe_quarantine_config": "quarantine_requires_safe_roots",
+        "invalid_path": "valid_path_required",
+        "allowed": "allow_default",
+    }
+
+    def _audit_payload(base: dict[str, Any], *, decision: str, reason_code: str, matched_rule: str) -> dict[str, Any]:
+        payload = dict(base)
+        payload["policy_decision"] = decision
+        payload["policy_reason_code"] = reason_code
+        payload["matched_rule"] = matched_rule
+        return payload
+
     for a in plan.get("actions", []):
         p = Path(a["path"])
         snapshot = a.get("snapshot", {})
@@ -206,13 +223,29 @@ def apply_prune(
         if reason:
             results["skipped"] += 1
             if audit_log:
-                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": reason})
+                append_prune_event(
+                    audit_log,
+                    _audit_payload(
+                        {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": reason},
+                        decision="allowed",
+                        reason_code="allowed",
+                        matched_rule="allow_default",
+                    ),
+                )
             continue
 
         if dry_run:
             results["skipped"] += 1
             if audit_log:
-                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": "dry_run"})
+                append_prune_event(
+                    audit_log,
+                    _audit_payload(
+                        {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": "dry_run"},
+                        decision="allowed",
+                        reason_code="allowed",
+                        matched_rule="allow_default",
+                    ),
+                )
             continue
 
         if action_mode in {"recycle", "delete", "move"}:
@@ -230,16 +263,22 @@ def apply_prune(
                 results["blocked"] += 1
                 blocked_reasons = results["blocked_reasons"]
                 blocked_reasons[reason_code] = int(blocked_reasons.get(reason_code, 0)) + 1
+                blocked_paths_by_reason.setdefault(reason_code, []).append(str(p))
                 if audit_log:
                     append_prune_event(
                         audit_log,
-                        {
-                            "action": a.get("action"),
-                            "path": str(p),
-                            "status": "skip",
-                            "reason_code": reason_code,
-                            "reason": reason,
-                        },
+                        _audit_payload(
+                            {
+                                "action": a.get("action"),
+                                "path": str(p),
+                                "status": "skip",
+                                "reason_code": reason_code,
+                                "reason": reason,
+                            },
+                            decision="blocked",
+                            reason_code=reason_code,
+                            matched_rule=policy_rule_map.get(reason_code, "policy_default_deny"),
+                        ),
                     )
                 continue
 
@@ -247,11 +286,45 @@ def apply_prune(
         if ok:
             results["applied"] += 1
             if audit_log:
-                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "success", "reason_code": "recycled"})
+                append_prune_event(
+                    audit_log,
+                    _audit_payload(
+                        {"action": "recycle", "path": str(p), "status": "success", "reason_code": "recycled"},
+                        decision="allowed",
+                        reason_code="allowed",
+                        matched_rule="allow_default",
+                    ),
+                )
         else:
             results["errors"] += 1
             if audit_log:
-                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "error", "reason_code": "recycle_failed"})
+                append_prune_event(
+                    audit_log,
+                    _audit_payload(
+                        {"action": "recycle", "path": str(p), "status": "error", "reason_code": "recycle_failed"},
+                        decision="allowed",
+                        reason_code="allowed",
+                        matched_rule="allow_default",
+                    ),
+                )
+
+    if audit_log:
+        safe_mkdir(audit_log)
+        report_payload = {
+            "blocked_total": results["blocked"],
+            "blocked_by_reason": results["blocked_reasons"],
+            "blocked_paths_by_reason": blocked_paths_by_reason,
+            "generated_at": _utc_now_iso(),
+        }
+        (audit_log / "policy_block_report.json").write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
+
+        summary_lines = [
+            "Policy summary",
+            f"- blocked_total: {results['blocked']}",
+        ]
+        for reason_code, count in sorted(results["blocked_reasons"].items()):
+            summary_lines.append(f"- {reason_code}: {count}")
+        (audit_log / "prune_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     return results
 
 # rest unchanged
