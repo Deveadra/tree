@@ -12,7 +12,7 @@ import time
 import tempfile
 
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
-from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix
+from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix, is_within_safe_delete_roots
 
 from dupe_core import safe_mkdir, write_json_atomic
 from core.space_categories import classify_path
@@ -350,13 +350,24 @@ def resolve_previous_snapshot(report_root: str | Path, current_report_dir: str |
     return candidates[-1][2]
 
 
-def summarize_top_dirs(snapshot: dict[str, Any], top_n: int = 100) -> list[dict[str, Any]]:
+
+
+def classify_zone(path: str, policy: ProtectionConfig) -> str:
+    p = str(path or "")
+    if is_under_protected_prefix(p, protected_prefixes=policy.protected_prefixes) or contains_protected_dir_name(p, protected_dir_names=policy.protected_dir_names):
+        return "protected zone"
+    if policy.safe_delete_roots and is_within_safe_delete_roots(p, safe_roots=[Path(r) for r in policy.safe_delete_roots]):
+        return "user-manageable zone"
+    return "unknown/system-managed"
+
+def summarize_top_dirs(snapshot: dict[str, Any], top_n: int = 100, policy_path: str | Path | None = None) -> list[dict[str, Any]]:
     dir_bytes = snapshot.get("tree", {}).get("dir_bytes", {})
     rows = sorted(dir_bytes.items(), key=lambda pair: pair[1], reverse=True)
+    policy_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     protected_paths = {item.get("path") for item in snapshot.get("protection", {}).get("skipped_regions", [])}
     out: list[dict[str, Any]] = []
     for path, total in rows[:top_n]:
-        row = {"path": path, "bytes": int(total)}
+        row = {"path": path, "bytes": int(total), "zone_tag": classify_zone(path, policy_cfg)}
         if path in protected_paths:
             row["warning"] = "Protected region: do not perform direct action without explicit override and validation."
         out.append(row)
@@ -373,6 +384,7 @@ def diff_space_snapshots(
     current_snapshot: dict[str, Any],
     previous_snapshot: dict[str, Any],
     noise_threshold_bytes: int = 0,
+    policy_path: str | Path | None = None,
 ) -> dict[str, Any]:
     current_dirs = current_snapshot.get("tree", {}).get("dir_bytes", {})
     previous_dirs = previous_snapshot.get("tree", {}).get("dir_bytes", {})
@@ -383,6 +395,7 @@ def diff_space_snapshots(
     ext_keys = _sort_keys_stable(set(current_ext) | set(previous_ext))
 
     threshold = max(0, int(noise_threshold_bytes))
+    policy_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     dir_rows: list[dict[str, Any]] = []
     growth_rows: list[dict[str, Any]] = []
     shrink_rows: list[dict[str, Any]] = []
@@ -405,6 +418,7 @@ def diff_space_snapshots(
 
         row = {
             "path": key,
+            "zone_tag": classify_zone(key, policy_cfg),
             "status": state,
             "previous_bytes": previous,
             "current_bytes": current,
@@ -875,7 +889,7 @@ def sample_free_space_timeline(
                     "free_delta_bytes": delta,
                     "threshold_bytes": int(free_space_drop_spike_threshold_bytes),
                 })
-                write_json_atomic(bundle_dir / "top_dir_deltas.json", {"rows": [{"dir": k, "delta_bytes": int(v)} for k, v in top_dir_deltas]})
+                write_json_atomic(bundle_dir / "top_dir_deltas.json", {"rows": [{"dir": k, "delta_bytes": int(v), "zone_tag": classify_zone(k, protection_cfg)} for k, v in top_dir_deltas]})
                 write_json_atomic(bundle_dir / "top_extension_deltas.json", {"rows": [{"extension": k, "delta_bytes": int(v)} for k, v in top_ext_deltas]})
                 write_json_atomic(bundle_dir / "process_io_snapshot.json", _collect_io_snapshot())
                 deleted_handles = _scan_deleted_open_handles()
@@ -912,6 +926,12 @@ def sample_free_space_timeline(
                         "free_bytes": free,
                         "threshold_bytes": threshold,
                         "severity": severity,
+                        "warning_banner": "WARNING: Protected-zone growth spike detected. Use safe alternatives; avoid direct deletions." if any(classify_zone(k, protection_cfg) == "protected zone" and int(v) > 0 for k, v in top_dir_deltas) else "",
+                        "safer_alternatives": [
+                            "Review application-level cache settings and clear cache from app preferences.",
+                            "Use retention limits (logs/backups/media history) instead of ad-hoc file deletions.",
+                            "Prefer OS storage cleanup utilities and documented cache paths for your platform.",
+                        ],
                     }
                 )
                 shrink_total = int(diff.get("totals", {}).get("total_shrink_bytes", 0))
@@ -1015,7 +1035,7 @@ def sample_correlated_space_timeline(
         fast_writer = csv.writer(fast_handle)
         growth_writer = csv.writer(growth_handle)
         fast_writer.writerow(["event_id", "stream", "timestamp", "total_bytes", "free_bytes", "used_bytes", "free_delta_bytes"])
-        growth_writer.writerow(["event_id", "stream", "timestamp", "tree_bytes_delta", "top_dir_growth_path", "top_dir_growth_bytes", "top_ext_growth", "top_ext_growth_bytes"])
+        growth_writer.writerow(["event_id", "stream", "timestamp", "tree_bytes_delta", "top_dir_growth_path", "top_dir_growth_zone", "top_dir_growth_bytes", "top_ext_growth", "top_ext_growth_bytes"])
         fast_handle.flush()
         growth_handle.flush()
         os.fsync(fast_handle.fileno())
@@ -1059,6 +1079,7 @@ def sample_correlated_space_timeline(
                 tree_delta = 0
                 top_dir_path = ""
                 top_dir_growth = 0
+                top_dir_zone = "unknown/system-managed"
                 top_ext = ""
                 top_ext_growth = 0
                 if prev_snapshot is not None:
@@ -1068,12 +1089,13 @@ def sample_correlated_space_timeline(
                     if ranked_growth:
                         top_dir_path = str(ranked_growth[0].get("path", ""))
                         top_dir_growth = int(ranked_growth[0].get("delta_bytes", 0))
+                        top_dir_zone = str(ranked_growth[0].get("zone_tag", "unknown/system-managed"))
                     ext_delta = diff.get("extensions", {}).get("ext_bytes_delta", {})
                     if ext_delta:
                         ext, delta = max(ext_delta.items(), key=lambda item: item[1])
                         top_ext = str(ext)
                         top_ext_growth = int(delta)
-                growth_writer.writerow([event_id, "growth", _utc_now_iso(), tree_delta, top_dir_path, top_dir_growth, top_ext, top_ext_growth])
+                growth_writer.writerow([event_id, "growth", _utc_now_iso(), tree_delta, top_dir_path, top_dir_zone, top_dir_growth, top_ext, top_ext_growth])
                 growth_handle.flush()
                 os.fsync(growth_handle.fileno())
                 prev_snapshot = current_snapshot

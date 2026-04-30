@@ -22,6 +22,8 @@ class SpaceAuditDiffTests(unittest.TestCase):
 
         diff = diff_space_snapshots(current, previous, noise_threshold_bytes=10)
 
+        self.assertIn("zone_tag", diff["tree"]["ranked_growth"][0])
+
         self.assertEqual(diff["summary"]["total_growth_bytes"], 180)
         self.assertEqual(diff["summary"]["total_shrink_bytes"], 110)
         self.assertEqual(diff["summary"]["net_change_bytes"], 70)
