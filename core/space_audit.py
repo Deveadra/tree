@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+import json
 import errno
 import os
 
@@ -297,6 +298,55 @@ def scan_space_usage(
     }
 
 
+def _sort_keys_stable(keys: set[str]) -> list[str]:
+    return sorted(keys, key=lambda item: (item != ".", item))
+
+
+def _safe_percent(delta: int, baseline: int) -> float | None:
+    if baseline <= 0:
+        return None
+    return (float(delta) / float(baseline)) * 100.0
+
+
+def _parse_iso_datetime(value: Any) -> datetime:
+    if not isinstance(value, str) or not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    candidate = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def resolve_previous_snapshot(report_root: str | Path, current_report_dir: str | Path, scan_root: str | Path) -> dict[str, Any] | None:
+    root = Path(report_root).resolve()
+    current = Path(current_report_dir).resolve()
+    scan_root_resolved = str(Path(scan_root).expanduser().resolve())
+
+    candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
+    for snapshot_path in root.glob("**/space_snapshot.json"):
+        snapshot_dir = snapshot_path.parent.resolve()
+        if snapshot_dir == current:
+            continue
+        try:
+            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(data.get("run", {}).get("root", "")) != scan_root_resolved:
+            continue
+        finished_at = _parse_iso_datetime(data.get("run", {}).get("finished_at"))
+        candidates.append((finished_at, snapshot_path, data))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], str(item[1])))
+    return candidates[-1][2]
+
+
 def summarize_top_dirs(snapshot: dict[str, Any], top_n: int = 100) -> list[dict[str, Any]]:
     dir_bytes = snapshot.get("tree", {}).get("dir_bytes", {})
     rows = sorted(dir_bytes.items(), key=lambda pair: pair[1], reverse=True)
@@ -316,14 +366,62 @@ def summarize_by_extension(snapshot: dict[str, Any], top_n: int = 100) -> list[d
     return [{"extension": ext, "bytes": int(total)} for ext, total in rows[:top_n]]
 
 
-def diff_space_snapshots(current_snapshot: dict[str, Any], previous_snapshot: dict[str, Any]) -> dict[str, Any]:
+def diff_space_snapshots(
+    current_snapshot: dict[str, Any],
+    previous_snapshot: dict[str, Any],
+    noise_threshold_bytes: int = 0,
+) -> dict[str, Any]:
     current_dirs = current_snapshot.get("tree", {}).get("dir_bytes", {})
     previous_dirs = previous_snapshot.get("tree", {}).get("dir_bytes", {})
     current_ext = current_snapshot.get("extensions", {}).get("ext_bytes", {})
     previous_ext = previous_snapshot.get("extensions", {}).get("ext_bytes", {})
 
-    dir_keys = set(current_dirs) | set(previous_dirs)
-    ext_keys = set(current_ext) | set(previous_ext)
+    dir_keys = _sort_keys_stable(set(current_dirs) | set(previous_dirs))
+    ext_keys = _sort_keys_stable(set(current_ext) | set(previous_ext))
+
+    threshold = max(0, int(noise_threshold_bytes))
+    dir_rows: list[dict[str, Any]] = []
+    growth_rows: list[dict[str, Any]] = []
+    shrink_rows: list[dict[str, Any]] = []
+
+    for key in dir_keys:
+        current = int(current_dirs.get(key, 0))
+        previous = int(previous_dirs.get(key, 0))
+        delta = current - previous
+        if abs(delta) < threshold:
+            continue
+        state = "unchanged"
+        if previous == 0 and current > 0:
+            state = "new"
+        elif current == 0 and previous > 0:
+            state = "deleted"
+        elif delta > 0:
+            state = "grown"
+        elif delta < 0:
+            state = "shrunk"
+
+        row = {
+            "path": key,
+            "status": state,
+            "previous_bytes": previous,
+            "current_bytes": current,
+            "delta_bytes": delta,
+            "delta_percent": _safe_percent(delta, previous),
+            "impact_bytes": abs(delta),
+        }
+        dir_rows.append(row)
+        if delta > 0:
+            growth_rows.append(row)
+        elif delta < 0:
+            shrink_rows.append(row)
+
+    growth_rows.sort(key=lambda item: (-item["impact_bytes"], item["path"]))
+    shrink_rows.sort(key=lambda item: (-item["impact_bytes"], item["path"]))
+    dir_rows.sort(key=lambda item: (-item["impact_bytes"], item["path"]))
+
+    total_growth = sum(item["delta_bytes"] for item in growth_rows)
+    total_shrink_abs = sum(abs(item["delta_bytes"]) for item in shrink_rows)
+    net_change = total_growth - total_shrink_abs
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -332,11 +430,26 @@ def diff_space_snapshots(current_snapshot: dict[str, Any], previous_snapshot: di
             "current_finished_at": current_snapshot.get("run", {}).get("finished_at"),
             "previous_finished_at": previous_snapshot.get("run", {}).get("finished_at"),
         },
+        "config": {"noise_threshold_bytes": threshold},
         "totals": {
             "tree_bytes_delta": int(current_snapshot.get("totals", {}).get("tree_bytes", 0)) - int(previous_snapshot.get("totals", {}).get("tree_bytes", 0)),
             "file_count_delta": int(current_snapshot.get("totals", {}).get("file_count", 0)) - int(previous_snapshot.get("totals", {}).get("file_count", 0)),
+            "total_growth_bytes": int(total_growth),
+            "total_shrink_bytes": int(total_shrink_abs),
+            "net_change_bytes": int(net_change),
         },
-        "tree": {"dir_bytes_delta": {k: int(current_dirs.get(k, 0)) - int(previous_dirs.get(k, 0)) for k in dir_keys}},
+        "summary": {
+            "total_growth_bytes": int(total_growth),
+            "total_shrink_bytes": int(total_shrink_abs),
+            "net_change_bytes": int(net_change),
+            "top_growth_contributors": growth_rows[:10],
+        },
+        "tree": {
+            "dir_bytes_delta": {k: int(current_dirs.get(k, 0)) - int(previous_dirs.get(k, 0)) for k in dir_keys},
+            "dir_delta_rows": dir_rows,
+            "ranked_growth": growth_rows,
+            "ranked_shrink": shrink_rows,
+        },
         "extensions": {"ext_bytes_delta": {k: int(current_ext.get(k, 0)) - int(previous_ext.get(k, 0)) for k in ext_keys}},
     }
 
@@ -363,7 +476,9 @@ def write_space_reports(
 
     if diff is not None:
         paths["diff"] = str(out_dir / "space_diff.json")
+        paths["diff_vs_previous"] = str(out_dir / "space_diff_vs_previous.json")
         write_json_atomic(Path(paths["diff"]), diff)
+        write_json_atomic(Path(paths["diff_vs_previous"]), diff)
 
     if timeline_row is not None:
         paths["timeline_row"] = str(out_dir / "space_timeline_row.json")
@@ -377,6 +492,7 @@ __all__ = [
     "scan_space_usage",
     "summarize_top_dirs",
     "summarize_by_extension",
+    "resolve_previous_snapshot",
     "diff_space_snapshots",
     "write_space_reports",
 ]
