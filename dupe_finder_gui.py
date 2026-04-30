@@ -74,6 +74,7 @@ from dupe_core import (
     fmt_duration,
     fmt_time,
     format_bytes,
+    make_audit_event,
     new_run_id,
 )
 from core.models import ScanRequest
