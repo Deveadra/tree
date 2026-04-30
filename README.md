@@ -108,6 +108,31 @@ Canonical import strategy: **flat-module imports with explicit test-runner PYTHO
 - CI test command: `pytest -q`
 - Import smoke check: `python -c "import config.path_rules; print('ok')"`
 
+## Scan profiling, progress metrics, and error budget
+
+Scanner progress now emits:
+- `listed`, `indexed`, `skipped`, `errors`
+- `dirs_visited`, `bytes_observed`, `elapsed_s`, and `depth_skipped`
+
+Runtime toggles:
+- `DUPE_SCAN_ERROR_BUDGET` (default `1000`): recoverable scan errors tolerated before early-stop.
+- `DUPE_SCAN_TREE_DEPTH_CAP` (default `256`): maximum directory depth traversed per root.
+- `DUPE_SCAN_PROFILE` (`0/1`): print one profile summary line per scanned root.
+
+Critical init failures (DB open/schema issues) still fail immediately; directory/file permission and disappearance errors remain recoverable until the error budget is exhausted.
+
+## Benchmarking large synthetic trees
+
+Use:
+
+```bash
+python scripts/benchmark_scan.py --dirs 200 --files-per-dir 200 --file-size 256
+```
+
+Expected ballpark ranges on a modern dev machine:
+- ~40k files: typically low single-digit seconds.
+- ~100k files: typically several seconds to tens of seconds, depending on filesystem and AV activity.
+
 
 ## Protection config (`config/protection.toml`)
 
