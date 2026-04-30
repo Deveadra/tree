@@ -97,3 +97,25 @@ def test_watchdog_respects_cancellation_and_schema_shape():
         lines = out_csv.read_text(encoding="utf-8").strip().splitlines()
         assert lines == ["timestamp,total_bytes,free_bytes,used_bytes,free_delta_bytes,spike"]
         assert result["mode"] == "watchdog_read_only"
+
+
+def test_watchdog_cancellation_skips_snapshot_scan(monkeypatch):
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        out_csv = root / "free_space_timeline.csv"
+        cancel = Event()
+        cancel.set()
+
+        def _raise_if_called(*args, **kwargs):
+            raise AssertionError("scan_space_usage should not run for pre-cancelled watchdog runs")
+
+        monkeypatch.setattr("core.space_audit.scan_space_usage", _raise_if_called)
+        result = sample_free_space_timeline(
+            root=root,
+            output_csv=out_csv,
+            interval_seconds=0.0,
+            max_rows=10,
+            cancel_flag=cancel,
+        )
+        assert result["cancelled"] is True
+        assert result["rows_written"] == 0
