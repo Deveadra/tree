@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -21,6 +24,47 @@ from dupe_core import (
     write_path_suggestions,
     write_scan_reports,
 )
+
+PRUNE_PLAN_SCHEMA_VERSION = "1.0"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _sha256_json(data: dict[str, Any]) -> str:
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _file_snapshot(path: Path) -> dict[str, Any]:
+    st = path.stat()
+    return {
+        "exists": True,
+        "size": st.st_size,
+        "mtime": int(st.st_mtime),
+        "hash": None,
+    }
+
+
+def _validate_plan_structure(plan: dict[str, Any]) -> None:
+    for key in ("schema", "metadata", "actions", "plan_checksum"):
+        if key not in plan:
+            raise ValueError(f"Missing required plan field: {key}")
+    if plan["schema"] != "plan-prune":
+        raise ValueError(f"Unsupported plan schema: {plan['schema']}")
+    meta = plan.get("metadata", {})
+    if meta.get("plan_version") != PRUNE_PLAN_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported plan version: {meta.get('plan_version')}")
+
+
+def _verify_plan_checksum(plan: dict[str, Any]) -> None:
+    expected = plan.get("plan_checksum")
+    unsigned = dict(plan)
+    unsigned.pop("plan_checksum", None)
+    actual = _sha256_json(unsigned)
+    if not isinstance(expected, str) or expected != actual:
+        raise ValueError("Plan checksum verification failed")
 
 
 def scan_to_db(
@@ -80,7 +124,7 @@ def serialize_dupes(groups: list[DupeGroup]) -> list[dict[str, Any]]:
     return out
 
 
-def plan_prune(groups: list[DupeGroup]) -> dict[str, Any]:
+def plan_prune(groups: list[DupeGroup], source_id: str = "unknown") -> dict[str, Any]:
     actions: list[dict[str, Any]] = []
     bytes_reclaimable = 0
     for g in groups:
@@ -90,42 +134,80 @@ def plan_prune(groups: list[DupeGroup]) -> dict[str, Any]:
         for f in g.files:
             if f.path == keep.path:
                 continue
-            actions.append({"action": "recycle", "path": f.path, "keep": keep.path, "size": f.size})
+            snapshot = _file_snapshot(Path(f.path)) if Path(f.path).exists() else {"exists": False, "size": None, "mtime": None, "hash": None}
+            actions.append({
+                "action": "recycle",
+                "path": f.path,
+                "keep": keep.path,
+                "size": f.size,
+                "snapshot": snapshot,
+            })
             bytes_reclaimable += f.size
-    return {
+
+    plan = {
+        "schema": "plan-prune",
+        "metadata": {
+            "plan_version": PRUNE_PLAN_SCHEMA_VERSION,
+            "generated_at": _utc_now_iso(),
+            "source_id": source_id,
+        },
         "groups": len(groups),
         "actions": actions,
         "files_to_prune": len(actions),
         "bytes_reclaimable": bytes_reclaimable,
         "dry_run_default": True,
     }
+    plan["plan_checksum"] = _sha256_json(plan)
+    return plan
 
 
 def apply_prune(plan: dict[str, Any], dry_run: bool = True, yes: bool = False, audit_log: Path | None = None) -> dict[str, Any]:
+    _validate_plan_structure(plan)
+    _verify_plan_checksum(plan)
+
     if not dry_run and not yes:
         raise ValueError("Refusing destructive action without --yes")
 
     results = {"applied": 0, "skipped": 0, "errors": 0, "dry_run": dry_run}
     for a in plan.get("actions", []):
         p = Path(a["path"])
+        snapshot = a.get("snapshot", {})
+        reason = None
+
+        if not p.exists():
+            reason = "file_missing"
+        elif snapshot.get("size") is not None and p.stat().st_size != snapshot.get("size"):
+            reason = "size_changed"
+        elif snapshot.get("mtime") is not None and int(p.stat().st_mtime) != snapshot.get("mtime"):
+            reason = "mtime_changed"
+
+        if reason:
+            results["skipped"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": reason})
+            continue
+
         if dry_run:
             results["skipped"] += 1
+            if audit_log:
+                append_prune_event(audit_log, {"action": a.get("action"), "path": str(p), "status": "skip", "reason_code": "dry_run"})
             continue
+
         ok = windows_recycle(p)
         if ok:
             results["applied"] += 1
             if audit_log:
-                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "ok"})
+                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "success", "reason_code": "recycled"})
         else:
             results["errors"] += 1
             if audit_log:
-                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "error"})
+                append_prune_event(audit_log, {"action": "recycle", "path": str(p), "status": "error", "reason_code": "recycle_failed"})
     return results
 
+# rest unchanged
 
 def write_reports(report_dir: Path, groups: list[DupeGroup], scan_stats: dict[str, Any], excludes: set[str]) -> None:
     safe_mkdir(report_dir)
-    # scan_stats and excludes are accepted for API stability with existing callers.
     write_scan_reports(report_dir=report_dir, dupes=groups)
     write_live_reports(report_dir=report_dir, dupes=groups)
     suggestions = analyze_path_prefixes(groups)
