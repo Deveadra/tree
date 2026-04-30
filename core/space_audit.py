@@ -1231,10 +1231,11 @@ def sample_free_space_timeline(
                     alert_windows[cause_window_id] = deduped_event
                     deduped_alerts.append(deduped_event)
                     metadata = {"first_seen": event_ts, "last_seen": event_ts, "count": 1}
-                spikes.append(deduped_event)
-                if not local_only_mode:
-                    _append_alert_feed({**deduped_event, "metadata": metadata})
-                _notify_local(f"[space-watchdog] {deduped_event['severity']} alert {deduped_event['root_cause_window']} count={deduped_event['count']}")
+                spike_event_id = f"spike-{int(time.time() * 1000)}-{rows_written}"
+                spike_event = {**deduped_event, "spike_event_id": spike_event_id}
+                spikes.append(spike_event)
+                _append_alert_feed({**spike_event, "metadata": metadata})
+                _notify_local(f"[space-watchdog] {spike_event['severity']} alert {spike_event['root_cause_window']} count={spike_event['count']}")
                 shrink_total = int(diff.get("totals", {}).get("total_shrink_bytes", 0))
                 if shrink_total > 0 and delta <= 0:
                     non_recovery_events.append({
@@ -1252,7 +1253,7 @@ def sample_free_space_timeline(
                         "sample": deleted_handles.get("deleted_open_file_handles", [])[:5],
                     })
                 event_window = {
-                    "event_id": spikes[-1]["event_id"],
+                    "event_id": spikes[-1]["spike_event_id"],
                     "window_start": spikes[-1]["timestamp"],
                     "window_end": spikes[-1]["timestamp"],
                     "directory_growth_windows": [],
@@ -1260,7 +1261,7 @@ def sample_free_space_timeline(
                     "process_io_deltas": [],
                 }
                 report = attribute_growth(event_window)
-                report_path = out_path.parent / f"attribution_report_{spikes[-1]['event_id']}.json"
+                report_path = out_path.parent / f"attribution_report_{spikes[-1]['spike_event_id']}.json"
                 write_json_atomic(report_path, report)
                 attribution_reports.append(str(report_path))
 
