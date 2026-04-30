@@ -547,7 +547,9 @@ def _write_text_atomic(path: Path, text: str) -> None:
 
 def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
     """Learn normal free-space oscillation for a volume and return threshold profile."""
-    samples = max(2, int(duration_minutes * 60))
+    duration_seconds = max(0.0, float(duration_minutes) * 60.0)
+    samples = max(2, int(duration_seconds) + 1)
+    sleep_seconds = duration_seconds / (samples - 1)
     previous_free: int | None = None
     deltas: list[int] = []
     for _ in range(samples):
@@ -556,7 +558,8 @@ def calibrate_baseline(volume: str, duration_minutes: float) -> dict[str, Any]:
         if previous_free is not None:
             deltas.append(abs(int(free - previous_free)))
         previous_free = free
-        time.sleep(0.0)
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
 
     if deltas:
         sorted_deltas = sorted(deltas)
