@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -17,6 +20,23 @@ class RecommendationConfig:
     top_n: int = 5
 
 
+@dataclass(frozen=True)
+class AIExecutionConfig:
+    model_routing: dict[str, str]
+    token_budget_per_run: int = 4000
+    time_budget_ms: int = 3000
+    max_analysis_window: int = 3
+
+
+@dataclass
+class _RunTelemetry:
+    tokens_used: int = 0
+    estimated_cost_usd: float = 0.0
+    llm_calls: int = 0
+    cache_hits: int = 0
+    fallback_count: int = 0
+
+
 DEFAULT_CONFIG = RecommendationConfig(
     root_cause_weights={
         "free_delta_severity": 0.45,
@@ -29,6 +49,14 @@ DEFAULT_CONFIG = RecommendationConfig(
         "growth_reclaim_ratio": 0.25,
     },
     risk_thresholds={"safe_max": 0.33, "caution_max": 0.66},
+)
+
+DEFAULT_EXECUTION_CONFIG = AIExecutionConfig(
+    model_routing={
+        "root_cause": "local",
+        "reclaim_opportunity": "hybrid",
+        "risk_assessment": "cloud",
+    }
 )
 
 
@@ -84,10 +112,25 @@ def _default_summary(rec: dict[str, Any]) -> str:
     )
 
 
+def _evidence_hash(evidence: dict[str, Any]) -> str:
+    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _offline_summary(rec: dict[str, Any], route: str) -> str:
+    return (
+        f"[{route}] {rec.get('title', 'Recommendation')} | "
+        f"risk={rec['risk_tier']} ({rec['risk_score']:.2f}) | "
+        f"reclaim={rec['reclaim_opportunity_score']:.2f}"
+    )
+
+
 def build_recommendations(
     evidence: dict[str, Any],
     *,
     config: RecommendationConfig = DEFAULT_CONFIG,
+    execution_config: AIExecutionConfig = DEFAULT_EXECUTION_CONFIG,
+    artifact_cache: dict[str, dict[str, Any]] | None = None,
     rationale_generator: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
     """Build deterministic recommendation scores and optional rationale text.
@@ -96,15 +139,11 @@ def build_recommendations(
     non-LLM summary.
     """
 
-    candidates = _extract_candidates(evidence)
-    user_notes = ""
-    try:
-        notes_features = evidence.get("user_notes_context", [])
-        if isinstance(notes_features, list) and notes_features:
-            user_notes = str(notes_features[0].get("notes") or notes_features[0].get("context", {}).get("notes", ""))
-    except Exception:
-        user_notes = ""
+    run_started = time.perf_counter()
+    candidates = _extract_candidates(evidence)[: max(1, execution_config.max_analysis_window)]
     recommendations: list[dict[str, Any]] = []
+    cache = artifact_cache if artifact_cache is not None else {}
+    telemetry = _RunTelemetry()
 
     for idx, candidate in enumerate(candidates):
         metrics = candidate.get("metrics", {}) if isinstance(candidate.get("metrics"), dict) else {}
@@ -148,16 +187,54 @@ def build_recommendations(
             "contains_irreversible_steps": bool(action_step and action_step.get("reversibility") == "irreversible"),
         }
 
+        route = execution_config.model_routing.get(str(candidate.get("task_type", "risk_assessment")), "local")
+        rec["model_route"] = route
+
+        evidence_key = _evidence_hash(
+            {
+                "candidate": candidate,
+                "route": route,
+                "weights": rec["weights"],
+                "thresholds": rec["thresholds"],
+            }
+        )
+        rec["analysis_evidence_hash"] = evidence_key
+        if evidence_key in cache:
+            cached = cache[evidence_key]
+            rec["rationale"] = cached["rationale"]
+            rec["rationale_mode"] = cached["rationale_mode"]
+            telemetry.cache_hits += 1
+            recommendations.append(rec)
+            continue
+
+        elapsed_ms = int((time.perf_counter() - run_started) * 1000)
+        budget_exceeded = telemetry.tokens_used >= execution_config.token_budget_per_run or elapsed_ms >= execution_config.time_budget_ms
+
         try:
-            rec["strict_prompt_template"] = build_strict_prompt_template(
-                evidence={"candidate": candidate, "metrics": metrics},
-                user_notes=user_notes,
-            )
-            rec["rationale"] = rationale_generator(rec) if rationale_generator else _default_summary(rec)
-            rec["rationale_mode"] = "llm" if rationale_generator else "deterministic"
+            if rationale_generator and not budget_exceeded:
+                rec["rationale"] = rationale_generator(rec)
+                rec["rationale_mode"] = "llm"
+                telemetry.llm_calls += 1
+                token_estimate = max(1, len(rec["rationale"].split()))
+                telemetry.tokens_used += token_estimate
+                telemetry.estimated_cost_usd += token_estimate * 0.000002
+            else:
+                rec["rationale"] = _default_summary(rec)
+                rec["rationale_mode"] = "deterministic"
         except Exception:
-            rec["rationale"] = _default_summary(rec)
+            rec["rationale"] = _offline_summary(rec, route)
             rec["rationale_mode"] = "fallback_non_llm"
+            telemetry.fallback_count += 1
+
+        if budget_exceeded and rec["rationale_mode"] != "fallback_non_llm":
+            rec["rationale"] = _offline_summary(rec, route)
+            rec["rationale_mode"] = "budget_offline_fallback"
+            telemetry.fallback_count += 1
+
+        cache[evidence_key] = {
+            "rationale": rec["rationale"],
+            "rationale_mode": rec["rationale_mode"],
+        }
 
         recommendations.append(rec)
 
@@ -182,6 +259,23 @@ def build_recommendations(
             ],
         },
         "deterministic": True,
+        "metadata": {
+            "analysis_window_applied": len(candidates),
+            "execution": {
+                "token_budget_per_run": execution_config.token_budget_per_run,
+                "time_budget_ms": execution_config.time_budget_ms,
+                "max_analysis_window": execution_config.max_analysis_window,
+                "model_routing": dict(execution_config.model_routing),
+            },
+            "telemetry": {
+                "tokens_used": telemetry.tokens_used,
+                "estimated_cost_usd": round(telemetry.estimated_cost_usd, 8),
+                "llm_calls": telemetry.llm_calls,
+                "cache_hits": telemetry.cache_hits,
+                "fallback_count": telemetry.fallback_count,
+                "elapsed_ms": int((time.perf_counter() - run_started) * 1000),
+            },
+        },
     }
     validate_allowlisted_schema(response, allowlisted_keys={"recommendations", "rankings", "deterministic"})
     return response
