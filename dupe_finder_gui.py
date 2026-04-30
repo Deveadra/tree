@@ -451,6 +451,10 @@ class SpaceAuditWorker(QObject):
                     metrics_cb=self.metrics.emit,
                     policy_path=self.policy_path,
                 )
+                if self._cancel_event.is_set() or bool(snapshot.get("cancelled")):
+                    self.status.emit("Disk usage analysis cancelled.")
+                    self.finished.emit({"cancelled": True})
+                    return
                 top_dirs = summarize_top_dirs(snapshot, top_n=12)
                 by_ext = summarize_by_extension(snapshot, top_n=30)
                 prev = resolve_previous_snapshot(self.report_dir.parent, self.report_dir, root)
