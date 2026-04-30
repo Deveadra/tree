@@ -177,6 +177,8 @@ def test_alerts_are_deduplicated_with_metadata_and_jsonl_feed():
         assert "first_seen" in alert and "last_seen" in alert
         lines = alerts_feed.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 3
+        assert len(result["attribution_reports"]) == 3
+        assert len({Path(path).name for path in result["attribution_reports"]}) == 3
 def test_correlated_watchdog_heartbeat_state_and_recovery():
     with TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
