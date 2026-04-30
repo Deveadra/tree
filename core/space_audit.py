@@ -973,6 +973,7 @@ def sample_free_space_timeline(
     probable_deleted_open_events: list[dict[str, Any]] = []
     plugin_failures = 0
     baseline_snapshot: dict[str, Any] | None = None
+    previous_snapshot: dict[str, Any] | None = None
     protection_cfg = resolve_protection_config(Path(policy_path) if policy_path else DEFAULT_TOML)
     cancelled = False
     attribution_reports: list[str] = []
@@ -1102,9 +1103,6 @@ def sample_free_space_timeline(
                 break
             if max_rows is not None and rows_written >= max_rows:
                 break
-            if baseline_snapshot is None:
-                baseline_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
-
             statvfs = os.statvfs(root_path)
             total = int(statvfs.f_blocks * statvfs.f_frsize)
             free = int(statvfs.f_bavail * statvfs.f_frsize)
@@ -1117,6 +1115,8 @@ def sample_free_space_timeline(
                 event_id = f"{int(time.time())}_{rows_written}"
                 bundle_dir = out_path.parent / f"evidence_bundle_{event_id}"
                 safe_mkdir(bundle_dir)
+                if baseline_snapshot is None:
+                    baseline_snapshot = previous_snapshot or scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 current_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
                 diff = diff_space_snapshots(current_snapshot, baseline_snapshot)
                 top_dir_deltas = sorted(
@@ -1264,6 +1264,11 @@ def sample_free_space_timeline(
                 report_path = out_path.parent / f"attribution_report_{spikes[-1]['spike_event_id']}.json"
                 write_json_atomic(report_path, report)
                 attribution_reports.append(str(report_path))
+            elif previous_snapshot is None:
+                # Keep the first baseline from a pre-spike sampling pass so first-spike
+                # attribution does not diff against a same-branch snapshot.
+                previous_snapshot = scan_space_usage(root_path, excludes=[], policy_path=policy_path)
+                baseline_snapshot = previous_snapshot
 
             writer.writerow([_utc_now_iso(), total, free, used, delta, int(spike)])
             handle.flush()
