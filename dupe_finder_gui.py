@@ -1108,7 +1108,20 @@ class MainWindow(QMainWindow):
         free_b = int(volume.get("free_bytes", 0))
         used_b = int(volume.get("used_bytes", 0))
         self.monitor_free_used_lbl.setText(f"Free/Used: {format_bytes(free_b)} free / {format_bytes(used_b)} used")
-        delta_b = int(diff_summaries[0].get("net_change_bytes", 0)) if diff_summaries else 0
+        snapshot_root = ""
+        if isinstance(snapshot, dict):
+            run_info = snapshot.get("run", {})
+            if isinstance(run_info, dict):
+                snapshot_root = str(run_info.get("root", ""))
+        matching_diff = next(
+            (
+                item
+                for item in diff_summaries
+                if isinstance(item, dict) and (not snapshot_root or str(item.get("root", "")) == snapshot_root)
+            ),
+            None,
+        )
+        delta_b = int(matching_diff.get("net_change_bytes", 0)) if isinstance(matching_diff, dict) else 0
         self.monitor_delta_lbl.setText(f"Recent delta: {format_bytes(abs(delta_b))} {'growth' if delta_b >= 0 else 'drop'}")
         self._monitor_deltas.append(delta_b)
         self._monitor_deltas = self._monitor_deltas[-30:]
