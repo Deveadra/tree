@@ -44,7 +44,7 @@ class ServiceApiSmokeTests(unittest.TestCase):
             plan = service.plan_prune([])
             self.assertEqual(plan["files_to_prune"], 0)
 
-            applied = service.apply_prune({"actions": []}, dry_run=True)
+            applied = service.apply_prune(service.plan_prune([]), dry_run=True)
             self.assertEqual(applied["skipped"], 0)
 
             service.write_reports(tmp / "reports", [], {"dupe_groups": 0}, set())

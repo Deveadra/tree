@@ -91,7 +91,7 @@ def main() -> int:
 
     if args.cmd == "plan-prune":
         groups = service.load_dupes(Path(args.db), compare_mode=args.compare)
-        plan = service.plan_prune(groups)
+        plan = service.plan_prune(groups, source_id=str(Path(args.db)))
         plan_path = Path(args.report_dir) / "prune_plan.json"
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
