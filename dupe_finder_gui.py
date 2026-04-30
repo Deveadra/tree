@@ -84,6 +84,7 @@ from dupe_core import (
     fmt_duration,
     fmt_time,
     format_bytes,
+    make_audit_event,
     new_run_id,
     write_live_reports,
     write_scan_reports,
