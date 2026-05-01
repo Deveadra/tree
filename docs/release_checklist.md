@@ -41,3 +41,11 @@ A release is considered eligible only after all gate jobs pass in CI.
 ## Final release decision
 - [ ] Confirm the `release_blocker` workflow job succeeded (depends on Gates B/C/D/E/F).
 - [ ] Archive CI run URL and test summary with release notes.
+
+## Gate G — Supply chain integrity and reproducible release artifacts
+- [ ] Built Linux/macOS/Windows artifacts using deterministic build script.
+- [ ] Generated `checksums.sha256.json` and verified with `scripts/release/verify_checksums.py`.
+- [ ] Generated SBOM artifacts (`*.spdx.json`) and provenance (`provenance.intoto.jsonl`).
+- [ ] Signed artifacts (`*.sig`) and published verification instructions.
+- [ ] Documented secure upgrade and rollback runbook.
+- **Release blocker:** any Gate G failure blocks release.
