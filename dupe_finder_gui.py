@@ -1235,41 +1235,38 @@ class MainWindow(QMainWindow):
 #         self._update_scan_setup_layout_mode()
 
         header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(LayoutMetrics.SPACING_SM)
         self.app_brand_lbl = ElidedLabel("Dupe Finder Pro — Safe Duplicate Discovery & Cleanup")
         self.app_brand_lbl.setStyleSheet(section_header_style)
         self.app_brand_lbl.setProperty("typographyRole", "title")
         self.app_brand_lbl.setMinimumWidth(0)
+        self.app_brand_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         header_row.addWidget(self.app_brand_lbl, 1)
 
         self.start_btn.setText("Start")
         self.cancel_btn.setText("Cancel")
 
-        tools_menu_btn = QToolButton()
+        tools_menu_btn = QToolButton(self)
         tools_menu_btn.setText("Tools / Logs")
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tools_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        tools_menu_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         tools_menu = QMenu(tools_menu_btn)
 
         self.primary_actions_widget = QWidget()
-        self.primary_actions_layout = QGridLayout(self.primary_actions_widget)
+        self.primary_actions_layout = QHBoxLayout(self.primary_actions_widget)
         self.primary_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.primary_actions_layout.setHorizontalSpacing(LayoutMetrics.SPACING_SM)
-        self.primary_actions_layout.setVerticalSpacing(LayoutMetrics.SPACING_SM)
+        self.primary_actions_layout.setSpacing(LayoutMetrics.SPACING_SM)
         self.primary_action_buttons = [
             self.start_btn,
-            self.space_audit_btn,
             self.cancel_btn,
-            self.load_btn,
-            self.open_reports_btn,
             tools_menu_btn,
         ]
+        for btn in self.primary_action_buttons:
+            self.primary_actions_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
         header_row.addWidget(self.primary_actions_widget, 0)
-        actions_card = QGroupBox("Primary Actions")
-        actions_layout = QHBoxLayout(actions_card)
-        actions_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
-        actions_layout.setSpacing(LayoutMetrics.SPACING_SM)
-        actions_layout.addLayout(header_row)
-        main.addWidget(actions_card, 1)
+        main.addLayout(header_row, 0)
 
         status_card = QGroupBox("Status & Progress")
         status_layout = QVBoxLayout(status_card)
@@ -1378,6 +1375,7 @@ class MainWindow(QMainWindow):
         main.setStretch(2, 1)
         main.setStretch(3, 1)
         main.setStretch(4, 8)
+        main.setStretch(5, 8)
 
         self._apply_size_policies()
 
@@ -1578,14 +1576,8 @@ class MainWindow(QMainWindow):
             if item and item.widget():
                 item.widget().setParent(self.primary_actions_widget)
 
-        compact = self.width() < 1366
-        if compact:
-            cols = 3
-            for idx, btn in enumerate(self.primary_action_buttons):
-                self.primary_actions_layout.addWidget(btn, idx // cols, idx % cols)
-        else:
-            for idx, btn in enumerate(self.primary_action_buttons):
-                self.primary_actions_layout.addWidget(btn, 0, idx)
+        for btn in self.primary_action_buttons:
+            self.primary_actions_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
 
     def run_resize_sanity_checks(self) -> list[tuple[int, bool, str]]:
         widths = [900, 1100, 1366, 1920]
