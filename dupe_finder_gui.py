@@ -1110,7 +1110,7 @@ class MainWindow(QMainWindow):
         self.top_scroll = QScrollArea()
         self.top_scroll.setWidgetResizable(True)
         self.top_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.top_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.top_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         self.top_scroll_widget = QWidget()
         self.top_scroll.setWidget(self.top_scroll_widget)
         root_layout.addWidget(self.top_scroll, 0)
@@ -1122,7 +1122,6 @@ class MainWindow(QMainWindow):
 
         scan_setup_header = QLabel("Scan Setup")
         scan_setup_header.setProperty("typographyRole", "section_header")
-        main.addWidget(scan_setup_header)
 
 #         scan_setup_card = QGroupBox()
         scan_setup_card = QGroupBox("Scan Setup")
@@ -1189,8 +1188,6 @@ class MainWindow(QMainWindow):
         basic_group.setLayout(self.basic_form)
 
         adv_group = QGroupBox("Advanced")
-        adv_group.setCheckable(True)
-        adv_group.setChecked(False)
         self.adv_form = QFormLayout()
         self.adv_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.adv_form.setContentsMargins(0, 0, 0, 0)
@@ -1213,12 +1210,30 @@ class MainWindow(QMainWindow):
 
         self.basic_group = basic_group
         self.adv_group = adv_group
+        self.advanced_toggle_btn = QToolButton()
+        self.advanced_toggle_btn.setText("Advanced")
+        self.advanced_toggle_btn.setCheckable(True)
+        self.advanced_toggle_btn.setChecked(False)
+        self.advanced_toggle_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.advanced_toggle_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+
+        self.advanced_panel = QWidget()
+        advanced_panel_layout = QVBoxLayout(self.advanced_panel)
+        advanced_panel_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_panel_layout.addWidget(self.adv_group)
+        self.advanced_panel.setVisible(False)
+        self.advanced_toggle_btn.toggled.connect(self.advanced_panel.setVisible)
+        self.advanced_toggle_btn.toggled.connect(
+            lambda expanded: self.advanced_toggle_btn.setArrowType(
+                Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+            )
+        )
+
         self.scan_setup_grid.addWidget(self.basic_group, 0, 0)
-        self.scan_setup_grid.addWidget(self.adv_group, 0, 1)
+        self.scan_setup_grid.addWidget(self.advanced_toggle_btn, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.scan_setup_grid.addWidget(self.advanced_panel, 2, 0)
         self.scan_setup_grid.setColumnStretch(0, 1)
-        self.scan_setup_grid.setColumnStretch(1, 1)
         scan_setup_card_layout.addLayout(self.scan_setup_grid)
-        main.addWidget(scan_setup_card, 1)
 #         main.addWidget(scan_setup_card)
 #         self._update_scan_setup_layout_mode()
 
@@ -1253,7 +1268,17 @@ class MainWindow(QMainWindow):
         for btn in self.primary_action_buttons:
             self.primary_actions_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
         header_row.addWidget(self.primary_actions_widget, 0)
-        main.addLayout(header_row, 0)
+        self.tier1_block = QWidget()
+        self.tier1_block_layout = QVBoxLayout(self.tier1_block)
+        self.tier1_block_layout.setContentsMargins(0, 0, 0, 0)
+        self.tier1_block_layout.setSpacing(LayoutMetrics.SPACING_MD)
+        self.tier1_block_layout.addWidget(scan_setup_header)
+        self.tier1_block_layout.addWidget(scan_setup_card)
+        self.tier1_block_layout.addLayout(header_row)
+        self.tier1_minimum_height = 260
+        self.tier1_block.setMinimumHeight(self.tier1_minimum_height)
+        self.tier1_block.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        main.insertWidget(0, self.tier1_block, 0)
 
         status_card = QGroupBox("Status & Progress")
         status_layout = QVBoxLayout(status_card)
@@ -1265,7 +1290,7 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.remaining_lbl)
         status_layout.addWidget(self.rclone_stats)
         status_layout.addWidget(self.status_box)
-        main.addWidget(status_card, 1)
+        main.addWidget(status_card, 0)
 
         summary_card = QGroupBox("Last Run Summary")
         summary_card.setCheckable(True)
@@ -1276,7 +1301,7 @@ class MainWindow(QMainWindow):
         summary_layout.addWidget(self.last_run_summary)
         summary_card.toggled.connect(self.last_run_summary.setVisible)
         self.last_run_summary.setVisible(summary_card.isChecked())
-        main.addWidget(summary_card, 1)
+        main.addWidget(summary_card, 0)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -1356,18 +1381,15 @@ class MainWindow(QMainWindow):
         right_l.addLayout(act_row)
 
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
 
 
-        main.setStretch(0, 1)
-        main.setStretch(1, 1)
-        main.setStretch(2, 1)
-        main.setStretch(3, 1)
-        main.setStretch(4, 1)
-        main.setStretch(5, 1)
+        main.setStretch(0, 0)  # Tier 1: must stay visible
+        main.setStretch(1, 0)  # Tier 3: status card
+        main.setStretch(2, 0)  # Tier 3: summary card
 
-        root_layout.addWidget(splitter, 1)
+        root_layout.addWidget(splitter, 4)
 
         self._apply_size_policies()
 
