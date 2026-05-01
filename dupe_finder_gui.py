@@ -75,6 +75,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QBoxLayout,
     QSizePolicy,
+    QFrame,
 )
 
 from core.service import (
@@ -1062,6 +1063,7 @@ class MainWindow(QMainWindow):
         self.files_table.customContextMenuRequested.connect(self._show_files_table_context_menu)
         self.files_table.cellDoubleClicked.connect(self.on_file_cell_double_clicked)
         self.files_table.cellClicked.connect(self.on_file_cell_clicked)
+        self.files_table.itemSelectionChanged.connect(self._update_context_sensitive_actions)
 
         self.delete_mode = QComboBox()
         self.delete_mode.addItems(
@@ -1381,23 +1383,43 @@ class MainWindow(QMainWindow):
         pref_row.addWidget(self.prefer_path_edit)
         pref_row.addWidget(self.prefer_path_btn)
         actions_layout.addLayout(pref_row)
-        actions_layout.addWidget(self.auto_prune_btn)
-        actions_layout.addWidget(self.compare_prune_btn)
-        actions_layout.addWidget(self.suggest_keep_paths_btn)
-        actions_layout.addWidget(self.suggest_paths_btn)
-        actions_layout.addWidget(self.analyze_paths_btn)
-        self.condensed_actions_btn = QToolButton()
-        self.condensed_actions_btn.setText("Quick actions")
-        self.condensed_actions_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        condensed_actions_menu = QMenu(self.condensed_actions_btn)
-        condensed_actions_menu.addAction(self.auto_prune_btn.text(), self.auto_prune_by_preferred_path)
-        condensed_actions_menu.addAction(self.compare_prune_btn.text(), self.compare_prune_delete_a_using_b)
-        condensed_actions_menu.addAction(self.suggest_keep_paths_btn.text(), self.open_suggest_keep_paths)
-        condensed_actions_menu.addAction(self.suggest_paths_btn.text(), self.open_path_suggestions)
-        condensed_actions_menu.addAction(self.analyze_paths_btn.text(), self.analyze_paths_suggest_prefixes)
-        self.condensed_actions_btn.setMenu(condensed_actions_menu)
-        actions_layout.addWidget(self.condensed_actions_btn)
-        self.condensed_actions_btn.setVisible(False)
+
+        self.quick_actions_group = QGroupBox("Quick actions")
+        quick_layout = QVBoxLayout(self.quick_actions_group)
+        quick_layout.setContentsMargins(LayoutMetrics.SPACING_SM, LayoutMetrics.SPACING_SM, LayoutMetrics.SPACING_SM, LayoutMetrics.SPACING_SM)
+        quick_layout.setSpacing(LayoutMetrics.SPACING_XS)
+        quick_layout.addWidget(self.auto_prune_btn)
+        quick_layout.addWidget(self.open_file_btn)
+        quick_layout.addWidget(self.open_folder_btn)
+        actions_layout.addWidget(self.quick_actions_group)
+
+        self.more_actions_toggle_btn = QToolButton()
+        self.more_actions_toggle_btn.setText("More actions")
+        self.more_actions_toggle_btn.setCheckable(True)
+        self.more_actions_toggle_btn.setChecked(False)
+        self.more_actions_toggle_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.more_actions_toggle_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.more_actions_toggle_btn.toggled.connect(lambda expanded: self.more_actions_toggle_btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow))
+        actions_layout.addWidget(self.more_actions_toggle_btn)
+
+        self.more_actions_panel = QFrame()
+        more_layout = QVBoxLayout(self.more_actions_panel)
+        more_layout.setContentsMargins(LayoutMetrics.SPACING_SM, 0, LayoutMetrics.SPACING_SM, LayoutMetrics.SPACING_SM)
+        more_layout.setSpacing(LayoutMetrics.SPACING_XS)
+        more_layout.addWidget(self.compare_prune_btn)
+
+        self.more_actions_btn = QToolButton()
+        self.more_actions_btn.setText("Utilities")
+        self.more_actions_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more_actions_menu = QMenu(self.more_actions_btn)
+        more_actions_menu.addAction(self.suggest_keep_paths_btn.text(), self.open_suggest_keep_paths)
+        more_actions_menu.addAction(self.suggest_paths_btn.text(), self.open_path_suggestions)
+        more_actions_menu.addAction(self.analyze_paths_btn.text(), self.analyze_paths_suggest_prefixes)
+        self.more_actions_btn.setMenu(more_actions_menu)
+        more_layout.addWidget(self.more_actions_btn)
+        self.more_actions_panel.setVisible(False)
+        self.more_actions_toggle_btn.toggled.connect(self.more_actions_panel.setVisible)
+        actions_layout.addWidget(self.more_actions_panel)
 
         del_row = QHBoxLayout()
         del_row.addWidget(QLabel("Delete mode:"))
@@ -1413,8 +1435,6 @@ class MainWindow(QMainWindow):
 
         act_row = QHBoxLayout()
         act_row.addWidget(self.keep_delete_btn)
-        act_row.addWidget(self.open_file_btn)
-        act_row.addWidget(self.open_folder_btn)
         actions_layout.addLayout(act_row)
         actions_layout.addStretch(1)
 
@@ -1488,6 +1508,7 @@ class MainWindow(QMainWindow):
         self.suggest_keep_paths_btn.clicked.connect(self.open_suggest_keep_paths)
 
         self.compare_mode_chk.toggled.connect(self.on_compare_mode_toggled)
+        self.compare_mode_chk.toggled.connect(lambda _checked: self._update_context_sensitive_actions())
         self.browse_root2_btn.clicked.connect(self.pick_root2)
         self.browse_root_btn.clicked.connect(self.pick_root)
         self.browse_report_btn.clicked.connect(self.pick_report_dir)
@@ -1553,6 +1574,7 @@ class MainWindow(QMainWindow):
         self._update_splitter_layout_mode()
         self._update_compact_layout()
         self._update_height_layout_mode()
+        self._update_context_sensitive_actions()
 
     def _set_form_layout_compact(self, form_layout: QFormLayout, compact: bool) -> None:
         if compact:
@@ -1606,6 +1628,7 @@ class MainWindow(QMainWindow):
         self._update_scan_setup_layout_mode()
         self._update_splitter_layout_mode()
         self._update_height_layout_mode()
+        self._update_context_sensitive_actions()
 
     def _update_splitter_layout_mode(self) -> None:
         if not hasattr(self, "main_splitter"):
@@ -1656,9 +1679,32 @@ class MainWindow(QMainWindow):
         self.scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_SM if compact else LayoutMetrics.SPACING_MD)
         self.secondary_layout.setSpacing(LayoutMetrics.SPACING_SM if compact else LayoutMetrics.SPACING_MD)
 
-        self.condensed_actions_btn.setVisible(compact)
-        for btn in (self.auto_prune_btn, self.compare_prune_btn, self.suggest_keep_paths_btn, self.suggest_paths_btn, self.analyze_paths_btn):
-            btn.setVisible(not compact)
+        if compact:
+            self.quick_actions_group.layout().setSpacing(2)
+            self.more_actions_panel.layout().setSpacing(2)
+            self.keep_delete_btn.setMinimumHeight(28)
+            self.keep_delete_btn.setMaximumHeight(30)
+        else:
+            self.quick_actions_group.layout().setSpacing(LayoutMetrics.SPACING_XS)
+            self.more_actions_panel.layout().setSpacing(LayoutMetrics.SPACING_XS)
+            self.keep_delete_btn.setMinimumHeight(34)
+            self.keep_delete_btn.setMaximumHeight(40)
+        self._update_context_sensitive_actions()
+
+
+    def _update_context_sensitive_actions(self) -> None:
+        has_group = bool(getattr(self, "current_digest", ""))
+        has_row = self.selected_row_path() is not None
+        compare_enabled = self.compare_mode_chk.isChecked()
+
+        self.open_file_btn.setVisible(has_row)
+        self.open_folder_btn.setVisible(has_row)
+        self.compare_prune_btn.setVisible(compare_enabled and has_group)
+        self.more_actions_btn.setVisible(has_group)
+        self.suggest_keep_paths_btn.setEnabled(has_group and compare_enabled)
+
+        self.keep_delete_btn.setEnabled(has_row and has_group)
+        self.keep_delete_btn.setText("Delete Duplicates (Keep Selected)" if has_row else "Delete Duplicates")
 
     def run_resize_sanity_checks(self) -> list[tuple[int, bool, str]]:
         widths = [900, 1100, 1366, 1920]
@@ -2975,6 +3021,7 @@ class MainWindow(QMainWindow):
 
         self.current_digest = digest
         self.load_group_into_table(self.dupe_by_digest[digest])
+        self._update_context_sensitive_actions()
 
     def load_group_into_table(self, g: DupeGroup) -> None:
         self.files_table.setSortingEnabled(False)
