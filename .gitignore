@@ -1,0 +1,23 @@
+.venv/*
+__pychache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+*.db
+*.bak
+*.tmp
+
+# Ignore virtual environment directories
+venv/
+env/
+
+# Ignore IDE specific files
+.idea/
+.vscode/
+
+# Ignore distribution files
+dist/
+build/
+*.egg-info/

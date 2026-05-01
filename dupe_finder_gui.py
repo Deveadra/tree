@@ -121,11 +121,11 @@ from core.reports import (
     append_prune_event,
     safe_mkdir,
     write_json_atomic,
-    windows_recycle,
+    # windows_recycle,
     write_live_reports,
     write_scan_reports,
     write_path_suggestions,
-    write_run_summary,
+    # write_run_summary,
     write_versioned_meta,
 )
 
