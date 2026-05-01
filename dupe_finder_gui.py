@@ -64,6 +64,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QGroupBox,
+    QListWidget,
+    QListWidgetItem,
+    QToolButton,
     QToolButton,
     QMenu,
 )
@@ -763,16 +766,23 @@ class MainWindow(QMainWindow):
 
         self.root_edit = QLineEdit()
         self.root_edit.setPlaceholderText(r"E:\  (or any folder path)")
+        self.root_edit.setClearButtonEnabled(True)
         self.browse_root_btn = QPushButton("Browse…")
         self.compare_mode_chk = QCheckBox("Compare two locations (Root A vs Root B)")
         self.root2_edit = QLineEdit()
         self.root2_edit.setPlaceholderText(r"Second root (e.g. E:\Backup\ or D:\)")
+        self.root2_edit.setClearButtonEnabled(True)
         self.browse_root2_btn = QPushButton("Browse…")
         self.root2_edit.setEnabled(False)
         self.browse_root2_btn.setEnabled(False)
 
         self.report_edit = QLineEdit(str(self.reports_root))
+        self.report_edit.setPlaceholderText(r"Example: E:\DupeReports")
+        self.report_edit.setClearButtonEnabled(True)
         self.browse_report_btn = QPushButton("Browse…")
+        self.browse_root_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        self.browse_root2_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        self.browse_report_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
 
         self.min_size_spin = QSpinBox()
         self.min_size_spin.setRange(0, 2_000_000_000)
@@ -786,10 +796,15 @@ class MainWindow(QMainWindow):
         # NOTE: this field supports BOTH:
         #   - dir names (e.g. ".git", "node_modules")
         #   - full path prefixes (e.g. "C:\Windows", "%LOCALAPPDATA%\Packages")
-        self.exclude_edit = QLineEdit(", ".join(sorted(DEFAULT_EXCLUDES)))
-        self.exclude_edit.setPlaceholderText(
-            r".git, node_modules, C:\Windows, %LOCALAPPDATA%\Packages, E:\$Recycle.Bin, ..."
-        )
+        self.exclude_input = QLineEdit()
+        self.exclude_input.setPlaceholderText(r"Example: .git or C:\Windows")
+        self.exclude_input.setClearButtonEnabled(True)
+        self.exclude_add_btn = QPushButton("Add")
+        self.exclude_list = QListWidget()
+        self.exclude_list.setMaximumHeight(90)
+        self.exclude_remove_btn = QPushButton("Remove selected")
+        for item in sorted(DEFAULT_EXCLUDES):
+            self.exclude_list.addItem(QListWidgetItem(item))
 
         self.start_btn = QPushButton("Start scan")
         self.space_audit_btn = QPushButton("Analyze disk usage…")
@@ -981,6 +996,8 @@ class MainWindow(QMainWindow):
 
         self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
+        self.trash_folder_edit.setClearButtonEnabled(True)
+        self.trash_folder_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
 
         self.keep_delete_btn = QPushButton("Delete Duplicates (Keep Selected)")
         self.open_file_btn = QPushButton("Open selected file")
@@ -1009,24 +1026,53 @@ class MainWindow(QMainWindow):
         form.setHorizontalSpacing(SPACING_MD)
         form.setVerticalSpacing(SPACING_SM)
 
+        basic_group = QGroupBox("Scan setup")
+        basic_form = QFormLayout()
         root_row = QHBoxLayout()
         root_row.setSpacing(SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
-        form.addRow("Root to scan:", root_row)
+        self.root_badge = QLabel("")
+        basic_form.addRow("Root to scan:", root_row)
+        basic_form.addRow("", self.root_badge)
 
-        form.addRow("", self.compare_mode_chk)
+        basic_form.addRow("", self.compare_mode_chk)
+        basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
 
         root2_row = QHBoxLayout()
         root2_row.setSpacing(SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
-        form.addRow("Root B (compare):", root2_row)
+        self.root2_badge = QLabel("")
+        basic_form.addRow("Root B (compare):", root2_row)
+        basic_form.addRow("", self.root2_badge)
 
         rep_row = QHBoxLayout()
         rep_row.setSpacing(SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
+        self.report_badge = QLabel("")
+        basic_form.addRow("Reports root:", rep_row)
+        basic_form.addRow("", self.report_badge)
+
+        basic_form.addRow("Min file size:", self.min_size_spin)
+        basic_group.setLayout(basic_form)
+        form.addRow(basic_group)
+
+        adv_group = QGroupBox("Advanced")
+        adv_group.setCheckable(True)
+        adv_group.setChecked(False)
+        adv_form = QFormLayout()
+        ex_row = QHBoxLayout()
+        ex_row.addWidget(self.exclude_input)
+        ex_row.addWidget(self.exclude_add_btn)
+        adv_form.addRow("Add exclude token:", ex_row)
+        adv_form.addRow("Exclude tokens:", self.exclude_list)
+        adv_form.addRow("", self.exclude_remove_btn)
+        adv_form.addRow("", self.follow_symlinks_chk)
+        adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
+        adv_group.setLayout(adv_form)
+        form.addRow(adv_group)
         form.addRow("Reports root:", rep_row)
 
         form.addRow("Min file size:", self.min_size_spin)
@@ -1178,6 +1224,12 @@ class MainWindow(QMainWindow):
         self.browse_root_btn.clicked.connect(self.pick_root)
         self.browse_report_btn.clicked.connect(self.pick_report_dir)
         self.trash_folder_btn.clicked.connect(self.pick_trash_dir)
+        self.exclude_add_btn.clicked.connect(self.add_exclude_token)
+        self.exclude_input.returnPressed.connect(self.add_exclude_token)
+        self.exclude_remove_btn.clicked.connect(self.remove_exclude_tokens)
+        self.root_edit.textChanged.connect(self.validate_setup_fields)
+        self.root2_edit.textChanged.connect(self.validate_setup_fields)
+        self.report_edit.textChanged.connect(self.validate_setup_fields)
 
         self.start_btn.clicked.connect(self.start_scan)
         self.space_audit_btn.clicked.connect(self.start_space_audit)
@@ -1214,6 +1266,50 @@ class MainWindow(QMainWindow):
         self._ex_cache_raw: Optional[str] = None
         self._ex_cache: tuple[set[str], list[str]] = (set(), [])
         self.allowed_roots: list[Path] = []
+        self.validate_setup_fields()
+        self.setTabOrder(self.root_edit, self.browse_root_btn)
+        self.setTabOrder(self.browse_root_btn, self.compare_mode_chk)
+        self.setTabOrder(self.compare_mode_chk, self.root2_edit)
+        self.setTabOrder(self.root2_edit, self.browse_root2_btn)
+        self.setTabOrder(self.browse_root2_btn, self.report_edit)
+        self.setTabOrder(self.report_edit, self.browse_report_btn)
+        self.setTabOrder(self.browse_report_btn, self.exclude_input)
+        self.setTabOrder(self.exclude_input, self.exclude_add_btn)
+        self.setTabOrder(self.exclude_add_btn, self.exclude_list)
+
+    def _set_badge(self, lbl: QLabel, text: str) -> None:
+        if text:
+            lbl.setText(f"⚠ {text}")
+            lbl.setStyleSheet("QLabel { color: #b45309; font-weight: 600; }")
+        else:
+            lbl.setText("")
+
+    def validate_setup_fields(self) -> None:
+        root = Path(self.root_edit.text().strip()) if self.root_edit.text().strip() else None
+        report = Path(self.report_edit.text().strip()) if self.report_edit.text().strip() else None
+        root2 = Path(self.root2_edit.text().strip()) if self.root2_edit.text().strip() else None
+        self._set_badge(self.root_badge, "" if (root and root.exists() and os.access(root, os.R_OK)) else "Path missing or not readable.")
+        show_root2_issue = self.compare_mode_chk.isChecked()
+        self._set_badge(self.root2_badge, "" if (not show_root2_issue or (root2 and root2.exists() and os.access(root2, os.R_OK))) else "Compare path missing or not readable.")
+        report_msg = ""
+        if not report or (report.exists() and not report.is_dir()):
+            report_msg = "Report location must be a folder."
+        elif report and report.exists() and not os.access(report, os.W_OK):
+            report_msg = "Report folder is not writable."
+        self._set_badge(self.report_badge, report_msg)
+
+    def add_exclude_token(self) -> None:
+        token = self.exclude_input.text().strip()
+        if not token:
+            return
+        existing = {self.exclude_list.item(i).text() for i in range(self.exclude_list.count())}
+        if token not in existing:
+            self.exclude_list.addItem(QListWidgetItem(token))
+        self.exclude_input.clear()
+
+    def remove_exclude_tokens(self) -> None:
+        for item in self.exclude_list.selectedItems():
+            self.exclude_list.takeItem(self.exclude_list.row(item))
 
     def _set_monitor_mode(self, mode: str) -> None:
         self._monitor_mode = mode
@@ -1649,6 +1745,7 @@ class MainWindow(QMainWindow):
         has_results = bool(self.dupe_by_digest)
         self.compare_prune_btn.setEnabled(enabled and has_results)
         self.suggest_keep_paths_btn.setEnabled(enabled and has_results)
+        self.validate_setup_fields()
 
     def pick_root2(self) -> None:
         d = QFileDialog.getExistingDirectory(
@@ -1745,11 +1842,15 @@ class MainWindow(QMainWindow):
           - prefixes: normalized full path prefixes to exclude
         Cached so we don't recompute on every file delete.
         """
-        raw = (self.exclude_edit.text() or "").strip()
+        parts = [
+            self.exclude_list.item(i).text().strip()
+            for i in range(self.exclude_list.count())
+            if self.exclude_list.item(i).text().strip()
+        ]
+        raw = ",".join(parts)
         if raw == self._ex_cache_raw and self._ex_cache:
             return self._ex_cache
 
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
         if not parts:
             parts = list(DEFAULT_EXCLUDES)
 
@@ -1857,7 +1958,7 @@ class MainWindow(QMainWindow):
         self.trash_folder_edit.setText(str(self.report_dir / "_trash"))
 
         # IMPORTANT: do NOT lowercase here; dupe_core.compile_excludes will normalize.
-        excludes = {s.strip() for s in (self.exclude_edit.text() or "").split(",") if s.strip()}
+        excludes = {self.exclude_list.item(i).text().strip() for i in range(self.exclude_list.count()) if self.exclude_list.item(i).text().strip()}
         if not excludes:
             excludes = set(DEFAULT_EXCLUDES)
 
@@ -1917,7 +2018,7 @@ class MainWindow(QMainWindow):
         if not roots:
             QMessageBox.warning(self, "Invalid root", "No valid root path is available for analysis.")
             return
-        excludes = {s.strip() for s in (self.exclude_edit.text() or "").split(",") if s.strip()}
+        excludes = {self.exclude_list.item(i).text().strip() for i in range(self.exclude_list.count()) if self.exclude_list.item(i).text().strip()}
         if not excludes:
             excludes = set(DEFAULT_EXCLUDES)
         if not self.report_dir or self.report_dir == self.reports_root:
