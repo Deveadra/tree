@@ -722,6 +722,15 @@ class PrefixSuggestDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    WARNING_TEXTS = {
+        "risk_mode_blocked_title": "Risk mode transition blocked",
+        "risk_mode_blocked_body": (
+            "Destructive transition prevented.\n\n"
+            "Following symlinks/junctions while elevated is blocked unless explicit unsafe mode is enabled."
+        ),
+        "confirmation_title": "Confirm destructive action",
+        "confirmation_primary": "Manual confirmation required before destructive execution.",
+    }
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Dupe Finder (GUI) — Size + SHA-256")
@@ -835,12 +844,16 @@ class MainWindow(QMainWindow):
         self.investigate_btn = QPushButton("Investigate disappearing space…")
         self.findings_summary = QTextEdit()
         self.findings_summary.setReadOnly(True)
+        self.findings_summary.setAccessibleName("Findings summary")
+        self.findings_summary.setAccessibleDescription("Shows preflight risk, warnings, and safe next-step guidance.")
         self.findings_summary.setPlaceholderText(
             "Top findings, confidence, protected-zone warnings, and safe next steps will appear here."
         )
         self.findings_summary.setFixedHeight(180)
         self.protected_warning_lbl = QLabel("")
         self.protected_warning_lbl.setWordWrap(True)
+        self.protected_warning_lbl.setAccessibleName("Protected warning banner")
+        self.protected_warning_lbl.setAccessibleDescription("Warning banner for protected/system-managed zone blocks.")
         self.protected_warning_lbl.setStyleSheet(
             "QLabel { background: #fff3cd; color: #7a4f01; border: 1px solid #f0ad4e; padding: 6px; font-weight: 600; }"
         )
@@ -1204,18 +1217,81 @@ class MainWindow(QMainWindow):
         if self.plan_state_combo.currentText() != "approved":
             QMessageBox.warning(self, "Approval required", "Plan must be approved before execution.")
             return
+        preflight = self._build_preflight_summary(self._selected_finding)
+        consequence_steps = self._build_consequence_steps(self._selected_finding)
         prompt = (
-            "Manual confirmation required.\n\n"
-            f"Finding: {self._selected_finding.get('finding', 'unknown')}\n"
-            f"Risk: {self._selected_finding.get('risk_label', 'unknown')}\n\n"
+            f"{self.WARNING_TEXTS['confirmation_primary']}\n\n"
+            f"{preflight}\n\n"
+            "Step consequences:\n"
+            f"{consequence_steps}\n\n"
+            "Type-safe flow:\n"
+            "1) Review policy blocks and irreversible impact.\n"
+            "2) Confirm destructive handoff.\n"
+            "3) Validate post-action outcomes and rollback readiness.\n\n"
             "Proceed with destructive action?"
         )
-        choice = QMessageBox.question(self, "Confirm destructive action", prompt, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        choice = QMessageBox.question(
+            self,
+            self.WARNING_TEXTS["confirmation_title"],
+            prompt,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
         if choice != QMessageBox.StandardButton.Yes:
             self.set_status("Destructive action cancelled by user.")
             return
         self.plan_state_combo.setCurrentText("executed")
-        self.set_status("Manual confirmation accepted. Marked plan as executed.")
+        self._show_post_action_validation_guidance(self._selected_finding)
+        self.set_status("Manual confirmation accepted. Marked plan as executed with validation guidance.")
+
+    def _build_preflight_summary(self, finding: dict) -> str:
+        finding_name = str(finding.get("finding", "unknown"))
+        risk = str(finding.get("risk_label", "unknown")).lower()
+        projected_gain = "unknown"
+        evidence = finding.get("evidence_citations", [])
+        if isinstance(evidence, list):
+            for entry in evidence:
+                token = str(entry)
+                if token.startswith("metric:delta_bytes="):
+                    try:
+                        projected_gain = format_bytes(abs(int(token.split("=", 1)[1])))
+                    except Exception:
+                        projected_gain = "unknown"
+                    break
+        policy_block = "none detected" if risk in {"low", "medium"} else "high-risk policy gate requires heightened review"
+        irreversible = "possible" if risk in {"high", "critical", "dangerous"} else "limited"
+        return (
+            "Preflight summary\n"
+            f"- Finding: {finding_name}\n"
+            f"- Projected gain: {projected_gain}\n"
+            f"- Policy blocks: {policy_block}\n"
+            f"- Irreversible impact: {irreversible}"
+        )
+
+    def _build_consequence_steps(self, finding: dict) -> str:
+        risk = str(finding.get("risk_label", "unknown")).lower()
+        return "\n".join(
+            [
+                f"• Pre-check: confirm protected-zone exclusions remain active (risk={risk}).",
+                "• Action: destructive transition may remove or move data.",
+                "• Immediate effect: storage may improve but recovery window may narrow.",
+                "• Validation: re-run analysis and verify delta, warnings, and policy compliance.",
+            ]
+        )
+
+    def _show_post_action_validation_guidance(self, finding: dict) -> None:
+        _ = finding
+        validation_prompt = (
+            "Post-action validation required.\n\n"
+            "Run these checks now:\n"
+            "• Re-scan target scope and compare projected vs actual reclaimed space.\n"
+            "• Confirm no protected/system-managed zones were impacted.\n"
+            "• Verify expected files still exist and hashes for canonical files remain stable.\n\n"
+            "Automated rollback guidance:\n"
+            "• If validation fails, stop further destructive actions.\n"
+            "• Restore from recycle/quarantine or known-good backup.\n"
+            "• Capture artifacts and rerun audit before retrying."
+        )
+        QMessageBox.information(self, "Validation and rollback guidance", validation_prompt)
 
     def _open_selected_evidence_bundle(self) -> None:
         row = self.monitor_spikes_table.currentRow()
@@ -1629,8 +1705,8 @@ class MainWindow(QMainWindow):
         if detect_elevated_privileges() and follow:
             QMessageBox.warning(
                 self,
-                "Risky mode blocked",
-                "Following symlinks/junctions while elevated is blocked unless explicit unsafe mode is enabled.",
+                self.WARNING_TEXTS["risk_mode_blocked_title"],
+                self.WARNING_TEXTS["risk_mode_blocked_body"],
             )
             return
 
