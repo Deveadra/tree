@@ -16,11 +16,11 @@
 Example:
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 # Install project deps (use your repo's requirement source)
-# e.g. pip install -r requirements.txt
+pip install -r requirements.txt
 python --version
 pytest --version
 ```
