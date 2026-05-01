@@ -741,9 +741,15 @@ class UITheme:
         "focus": "#7dd3fc",
         "border": "#334155",
     }
-    TYPE_SCALE = {"xs": 11, "sm": 12, "md": 13, "lg": 16}
+    TYPE_SCALE = {"xs": 11, "sm": 12, "md": 13, "lg": 16, "xl": 20}
+    TYPOGRAPHY = {
+        "title": {"size": TYPE_SCALE["xl"], "weight": 700, "line_height": 1.35},
+        "section_header": {"size": TYPE_SCALE["lg"], "weight": 700, "line_height": 1.35},
+        "body": {"size": TYPE_SCALE["md"], "weight": 400, "line_height": 1.45},
+        "caption": {"size": TYPE_SCALE["sm"], "weight": 500, "line_height": 1.35},
+    }
     CORNER_RADIUS = 8
-    CONTROL_HEIGHT = 36
+    CONTROL_HEIGHT = 34
     TOUCH_TARGET = 40
     ICON_SIZE = 18
 
@@ -1081,8 +1087,18 @@ class MainWindow(QMainWindow):
         main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
         main.setSpacing(LayoutMetrics.SPACING_MD)
 
-        section_header_style = f"QLabel {{ font-size: {UITheme.TYPE_SCALE['lg']}px; font-weight: 700; color: {UITheme.PALETTE['text']}; }}"
+        section_header_style = (
+            f"QLabel {{ font-size: {UITheme.TYPOGRAPHY['section_header']['size']}px; "
+            f"font-weight: {UITheme.TYPOGRAPHY['section_header']['weight']}; "
+            f"color: {UITheme.PALETTE['text']}; }}"
+        )
 
+        scan_setup_header = QLabel("Scan Setup")
+        scan_setup_header.setStyleSheet(section_header_style)
+        scan_setup_header.setProperty("typographyRole", "section_header")
+        main.addWidget(scan_setup_header)
+
+#         scan_setup_card = QGroupBox()
         scan_setup_card = QGroupBox("Scan Setup")
         scan_setup_card_layout = QVBoxLayout(scan_setup_card)
         scan_setup_card_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
@@ -1183,6 +1199,7 @@ class MainWindow(QMainWindow):
         header_row.setSpacing(SPACING_SM)
         self.app_brand_lbl = ElidedLabel("Dupe Finder Pro — Safe Duplicate Discovery & Cleanup")
         self.app_brand_lbl.setStyleSheet(section_header_style)
+        self.app_brand_lbl.setProperty("typographyRole", "title")
         self.app_brand_lbl.setMinimumWidth(0)
         header_row.addWidget(self.app_brand_lbl, 1)
 
@@ -1238,6 +1255,7 @@ class MainWindow(QMainWindow):
         left_l.setSpacing(LayoutMetrics.SPACING_SM)
         results_header = QLabel("Results")
         results_header.setStyleSheet(section_header_style)
+        results_header.setProperty("typographyRole", "section_header")
         left_l.addWidget(results_header)
         filters_row = QHBoxLayout()
         filters_row.addWidget(QLabel("Quick filters:"))
@@ -1250,7 +1268,7 @@ class MainWindow(QMainWindow):
         filters_row.addStretch(1)
         left_l.addLayout(filters_row)
         self.results_empty_lbl = QLabel("Run a scan to see duplicate groups.")
-        self.results_empty_lbl.setStyleSheet("QLabel { color: #6b7280; font-style: italic; }")
+        self.results_empty_lbl.setStyleSheet("QLabel { color: #94a3b8; font-style: italic; }")
         left_l.addWidget(self.results_empty_lbl)
         left_l.addWidget(self.tabs, 1)
         splitter.addWidget(left)
@@ -1261,11 +1279,13 @@ class MainWindow(QMainWindow):
         right_l.setSpacing(LayoutMetrics.SPACING_SM)
         actions_header_right = QLabel("Recommended Actions")
         actions_header_right.setStyleSheet(section_header_style)
+        actions_header_right.setProperty("typographyRole", "section_header")
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table, 1)
         self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
-        self.row_hint_lbl.setStyleSheet("QLabel { color: #4b5563; }")
+        self.row_hint_lbl.setStyleSheet("QLabel { color: #cbd5e1; }")
+        self.row_hint_lbl.setProperty("typographyRole", "caption")
         right_l.addWidget(self.row_hint_lbl)
         self.detail_size_card = QLabel("Size: —")
         self.detail_mtime_card = QLabel("Modified: —")
@@ -1941,28 +1961,87 @@ class MainWindow(QMainWindow):
             QWidget {{
                 background: {palette['surface']};
                 color: {palette['text']};
-                font-size: {UITheme.TYPE_SCALE['md']}px;
+                font-size: {UITheme.TYPOGRAPHY['body']['size']}px;
+                line-height: {UITheme.TYPOGRAPHY['body']['line_height']};
+            }}
+            QLabel {{
+                padding-top: 2px;
+                padding-bottom: 2px;
+            }}
+            QLabel[typographyRole="title"] {{
+                font-size: {UITheme.TYPOGRAPHY['title']['size']}px;
+                font-weight: {UITheme.TYPOGRAPHY['title']['weight']};
+            }}
+            QLabel[typographyRole="section_header"] {{
+                font-size: {UITheme.TYPOGRAPHY['section_header']['size']}px;
+                font-weight: {UITheme.TYPOGRAPHY['section_header']['weight']};
+            }}
+            QLabel[typographyRole="caption"] {{
+                font-size: {UITheme.TYPOGRAPHY['caption']['size']}px;
+                font-weight: {UITheme.TYPOGRAPHY['caption']['weight']};
+                color: {palette['text_muted']};
             }}
             QGroupBox, QTabWidget::pane, QTableWidget, QTextEdit, QListWidget, QTreeWidget, QLineEdit, QComboBox, QSpinBox {{
                 background: {palette['surface_alt']};
                 border: 1px solid {palette['border']};
                 border-radius: {UITheme.CORNER_RADIUS}px;
             }}
-            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox {{
+            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox, QTextEdit {{
                 min-height: {UITheme.TOUCH_TARGET}px;
                 border-radius: {UITheme.CORNER_RADIUS}px;
-                padding: 6px 10px;
+                padding: 8px 10px;
             }}
             QPushButton:hover, QToolButton:hover {{ background: #243447; }}
             QPushButton:pressed, QToolButton:pressed {{ background: #334155; }}
             QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus,
-            QSpinBox:focus, QListWidget:focus, QTreeWidget:focus, QTableWidget:focus {{
-                border: 2px solid {palette['focus']};
-                outline: none;
+            QSpinBox:focus, QListWidget:focus, QTreeWidget:focus, QTableWidget:focus, QTextEdit:focus {{
+                border: 1px solid {palette['focus']};
+                outline: 2px solid {palette['focus']};
+                outline-offset: 1px;
+            }}
+            QWidget:disabled {{
+                color: #94a3b8;
+            }}
+            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QTextEdit:disabled, QListWidget:disabled {{
+                background: #1b2638;
+                color: #9ca3af;
+                border: 1px solid #475569;
             }}
             QLabel[statusRole="warning"] {{ color: {palette['warning']}; font-weight: 700; }}
             QLabel[statusRole="danger"] {{ color: {palette['danger']}; font-weight: 700; }}
             QLabel[statusRole="success"] {{ color: {palette['success']}; font-weight: 700; }}
+            QPushButton[buttonRole="primary"] {{
+                background-color: #2563eb;
+                color: #ffffff;
+                border: 1px solid #1d4ed8;
+                font-weight: 600;
+            }}
+            QPushButton[buttonRole="primary"]:hover {{ background-color: #1d4ed8; }}
+            QPushButton[buttonRole="primary"]:pressed {{ background-color: #1e40af; }}
+            QPushButton[buttonRole="primary"]:disabled {{ background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }}
+            QPushButton[buttonRole="secondary"] {{
+                background-color: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #475569;
+            }}
+            QPushButton[buttonRole="secondary"]:hover {{ background-color: #334155; }}
+            QPushButton[buttonRole="secondary"]:pressed {{ background-color: #475569; }}
+            QPushButton[buttonRole="secondary"]:disabled {{ background-color: #1f2937; color: #94a3b8; border: 1px solid #334155; }}
+            QPushButton[buttonRole="destructive"] {{
+                background-color: #dc2626;
+                color: #ffffff;
+                border: 1px solid #b91c1c;
+                font-weight: 600;
+            }}
+            QPushButton[buttonRole="destructive"]:hover {{ background-color: #b91c1c; }}
+            QPushButton[buttonRole="destructive"]:pressed {{ background-color: #991b1b; }}
+            QPushButton[buttonRole="destructive"]:disabled {{ background-color: #7f1d1d; color: #fecaca; border: 1px solid #7f1d1d; }}
+            QToolTip {{
+                background-color: #111827;
+                color: #f9fafb;
+                border: 1px solid #374151;
+                padding: 4px 6px;
+            }}
         """)
         self.monitor_is_read_only_lbl.setProperty("statusRole", "danger")
         self.monitor_alert_lbl.setProperty("statusRole", "success")
@@ -2001,54 +2080,8 @@ class MainWindow(QMainWindow):
             btn.setProperty("buttonRole", "secondary")
         for btn in destructive_buttons:
             btn.setProperty("buttonRole", "destructive")
-        self.setStyleSheet(
-            """
-            QPushButton[buttonRole="primary"] {
-                background-color: #1f6feb;
-                color: #ffffff;
-                border: 1px solid #1a5fcc;
-                font-weight: 600;
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QPushButton[buttonRole="primary"]:disabled {
-                background-color: #9bbcf2;
-                color: #f4f7fc;
-                border: 1px solid #7da5e9;
-            }
-            QPushButton[buttonRole="secondary"] {
-                background-color: #f3f4f6;
-                color: #1f2937;
-                border: 1px solid #c8ced8;
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QPushButton[buttonRole="secondary"]:disabled {
-                background-color: #eceff3;
-                color: #67768a;
-                border: 1px solid #d3d9e2;
-            }
-            QPushButton[buttonRole="destructive"] {
-                background-color: #c0392b;
-                color: #ffffff;
-                border: 1px solid #a93226;
-                font-weight: 600;
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QPushButton[buttonRole="destructive"]:disabled {
-                background-color: #e8b3ad;
-                color: #fff8f7;
-                border: 1px solid #d99d97;
-            }
-            QToolTip {
-                background-color: #111827;
-                color: #f9fafb;
-                border: 1px solid #374151;
-                padding: 4px 6px;
-            }
-            """
-        )
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def _apply_tooltips(self) -> None:
         self.space_audit_btn.setToolTip("Review disk usage trends and largest folders.")
