@@ -963,6 +963,13 @@ class MainWindow(QMainWindow):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self.files_table.setSortingEnabled(True)
+        self.files_table.setAlternatingRowColors(True)
+        self.files_table.setStyleSheet(
+            "QHeaderView::section { background-color: #1f2937; color: white; font-weight: 700; padding: 6px; }"
+            "QTableWidget { gridline-color: #d1d5db; alternate-background-color: #f8fafc; }"
+        )
+        self.files_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.files_table.customContextMenuRequested.connect(self._show_files_table_context_menu)
         self.files_table.cellDoubleClicked.connect(self.on_file_cell_double_clicked)
         self.files_table.cellClicked.connect(self.on_file_cell_clicked)
 
@@ -1108,7 +1115,8 @@ class MainWindow(QMainWindow):
         main.addWidget(self.rclone_stats)
         main.addWidget(self.status_box)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = self.main_splitter
 
         left = QWidget()
         left_l = QVBoxLayout(left)
@@ -1117,6 +1125,19 @@ class MainWindow(QMainWindow):
         results_header = QLabel("Results")
         results_header.setStyleSheet(section_header_style)
         left_l.addWidget(results_header)
+        filters_row = QHBoxLayout()
+        filters_row.addWidget(QLabel("Quick filters:"))
+        self.filter_large_btn = QPushButton("Large files")
+        self.filter_recent_btn = QPushButton("Recent")
+        self.filter_reclaim_btn = QPushButton("High reclaim potential")
+        for _b in (self.filter_large_btn, self.filter_recent_btn, self.filter_reclaim_btn):
+            _b.setCheckable(True)
+            filters_row.addWidget(_b)
+        filters_row.addStretch(1)
+        left_l.addLayout(filters_row)
+        self.results_empty_lbl = QLabel("Run a scan to see duplicate groups.")
+        self.results_empty_lbl.setStyleSheet("QLabel { color: #6b7280; font-style: italic; }")
+        left_l.addWidget(self.results_empty_lbl)
         left_l.addWidget(self.tabs)
         splitter.addWidget(left)
 
@@ -1129,6 +1150,15 @@ class MainWindow(QMainWindow):
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table)
+        self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
+        self.row_hint_lbl.setStyleSheet("QLabel { color: #4b5563; }")
+        right_l.addWidget(self.row_hint_lbl)
+        self.detail_size_card = QLabel("Size: —")
+        self.detail_mtime_card = QLabel("Modified: —")
+        self.detail_path_card = QLabel("Path health/protection: —")
+        for _card in (self.detail_size_card, self.detail_mtime_card, self.detail_path_card):
+            _card.setStyleSheet("QLabel { border: 1px solid #d1d5db; border-radius: 6px; padding: 6px; background: #f9fafb; }")
+            right_l.addWidget(_card)
 
         pref_row = QHBoxLayout()
         pref_row.addWidget(QLabel("Preferred keep path:"))
@@ -1240,6 +1270,9 @@ class MainWindow(QMainWindow):
 
         self.tree_by_name.itemSelectionChanged.connect(self.on_tree_selection)
         self.tree_by_hash.itemSelectionChanged.connect(self.on_tree_selection)
+        self.filter_large_btn.toggled.connect(self._refresh_tree_views)
+        self.filter_recent_btn.toggled.connect(self._refresh_tree_views)
+        self.filter_reclaim_btn.toggled.connect(self._refresh_tree_views)
 
         self.keep_delete_btn.clicked.connect(self.keep_selected_delete_others)
         self.open_file_btn.clicked.connect(self.open_selected_file)
@@ -1276,6 +1309,7 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.browse_report_btn, self.exclude_input)
         self.setTabOrder(self.exclude_input, self.exclude_add_btn)
         self.setTabOrder(self.exclude_add_btn, self.exclude_list)
+        self._restore_ui_state()
 
     def _set_badge(self, lbl: QLabel, text: str) -> None:
         if text:
@@ -2237,6 +2271,7 @@ class MainWindow(QMainWindow):
             self.suggest_keep_paths_btn.setEnabled(True)
 
         self.populate_trees(dupes)
+        self._refresh_tree_views()
         self.update_remaining_indicator()
 
         reclaimable = sum((len(g.files) - 1) * g.size for g in dupes)
@@ -2314,6 +2349,46 @@ class MainWindow(QMainWindow):
 
             top.setExpanded(False)
 
+    def _filtered_groups(self) -> list[DupeGroup]:
+        groups = list(self.dupe_by_digest.values())
+        if self.filter_large_btn.isChecked():
+            groups = [g for g in groups if g.size >= 500 * 1024 * 1024]
+        if self.filter_recent_btn.isChecked():
+            cutoff = time.time() - (30 * 24 * 3600)
+            groups = [g for g in groups if any(f.mtime >= cutoff for f in g.files)]
+        if self.filter_reclaim_btn.isChecked():
+            groups = [g for g in groups if g.size * max(0, len(g.files) - 1) >= 2 * 1024 * 1024 * 1024]
+        return groups
+
+    def _refresh_tree_views(self) -> None:
+        self.populate_trees(self._filtered_groups())
+        self.results_empty_lbl.setVisible(not bool(self._filtered_groups()))
+
+    def _restore_ui_state(self) -> None:
+        settings = QSettings("DupeFinder", "DupeFinderGUI")
+        header_state = settings.value("files_table_header_state")
+        if header_state is not None:
+            self.files_table.horizontalHeader().restoreState(header_state)
+        split_state = settings.value("main_splitter_state")
+        if split_state is not None:
+            self.main_splitter.restoreState(split_state)
+
+    def closeEvent(self, event) -> None:
+        settings = QSettings("DupeFinder", "DupeFinderGUI")
+        settings.setValue("files_table_header_state", self.files_table.horizontalHeader().saveState())
+        settings.setValue("main_splitter_state", self.main_splitter.saveState())
+        super().closeEvent(event)
+
+    def _show_files_table_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        open_file = menu.addAction("Open file")
+        open_folder = menu.addAction("Open containing folder")
+        reveal = menu.exec(self.files_table.viewport().mapToGlobal(pos))
+        if reveal == open_file:
+            self.open_selected_file()
+        elif reveal == open_folder:
+            self.open_selected_folder()
+
     def on_tree_selection(self) -> None:
         tree = self.tabs.currentWidget()
         if not isinstance(tree, QTreeWidget):
@@ -2349,8 +2424,10 @@ class MainWindow(QMainWindow):
 
             size_item = QTableWidgetItem(format_bytes(f.size))
             size_item.setData(Qt.ItemDataRole.UserRole, f.size)
+            size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             mtime_item = QTableWidgetItem(fmt_time(f.mtime))
+            mtime_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             mtime_item.setData(Qt.ItemDataRole.UserRole, f.mtime)
 
             path_item = QTableWidgetItem(f.path)
@@ -2361,7 +2438,10 @@ class MainWindow(QMainWindow):
             self.files_table.setItem(row, 3, path_item)
 
         self.files_table.resizeColumnsToContents()
+        self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.files_table.itemSelectionChanged.connect(self._update_selected_file_details)
         self.files_table.setSortingEnabled(True)
+        self._update_selected_file_details()
 
     def selected_row_path(self) -> Optional[str]:
         rows = self.files_table.selectionModel().selectedRows()
@@ -2394,26 +2474,35 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Open failed", str(e))
 
     def on_file_cell_double_clicked(self, row: int, col: int) -> None:
-        if col != 3:
-            return
+        _ = col
         item = self.files_table.item(row, 3)
-        if not item:
-            return
-        p = item.text().strip()
-        if not p:
-            return
-        self.reveal_in_explorer(p)
+        if item and item.text().strip():
+            self.reveal_in_explorer(item.text().strip())
 
     def on_file_cell_clicked(self, row: int, col: int) -> None:
-        if col != 3:
-            return
-        item = self.files_table.item(row, 3)
-        if not item:
-            return
-        p = item.text().strip()
+        _ = col
+        self._update_selected_file_details()
+
+    def _update_selected_file_details(self) -> None:
+        p = self.selected_row_path()
         if not p:
+            self.detail_size_card.setText("Size: —")
+            self.detail_mtime_card.setText("Modified: —")
+            self.detail_path_card.setText("Path health/protection: Select a row")
             return
-        self.reveal_in_explorer(p)
+        try:
+            st = os.stat(p)
+            size_txt = format_bytes(st.st_size)
+            mtime_txt = fmt_time(st.st_mtime)
+            health = "exists"
+        except Exception:
+            size_txt = "n/a"
+            mtime_txt = "n/a"
+            health = "missing"
+        prot = "protected" if self._path_protection_match(p) else "normal"
+        self.detail_size_card.setText(f"Size: {size_txt}")
+        self.detail_mtime_card.setText(f"Modified: {mtime_txt}")
+        self.detail_path_card.setText(f"Path health/protection: {health}, {prot}\n{p}")
 
     # ----------------------------
     # Prune / delete actions
