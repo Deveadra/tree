@@ -1,38 +1,43 @@
-# Release checklist mapped to CI gates (A-E)
+# Release checklist mapped to CI gates (A-F)
 
 A release is considered eligible only after all gate jobs pass in CI.
 
-## Gate A — Core scan/rule correctness
+## Gate A — Core scan/rule correctness (unit + integration + E2E)
+- [ ] `tests/test_scan_progress_and_budget.py` passed.
 - [ ] `tests/test_collector_plugins.py` passed.
 - [ ] `tests/test_path_rules.py` passed.
-- [ ] `tests/test_scan_progress_and_budget.py` passed.
-- [ ] `tests/test_space_audit_metrics.py` passed.
-- **Pass criteria:** scan/rule and metrics behavior remains deterministic and bounded.
+- [ ] `tests/test_cli_e2e_smoke.py` passed.
+- **Pass criteria:** scan/rule behavior remains deterministic and bounded.
 
-## Gate B — Prune plan/apply behavior
+## Gate B — Prune safety/integrity behavior (unit + integration)
 - [ ] `tests/test_prune_plan_integrity.py` passed.
 - [ ] `tests/test_prune_flows_integration.py` passed.
 - [ ] `tests/test_space_audit_integration_and_safety.py` passed.
-- **Pass criteria:** prune planning/apply paths remain stable and safety controls stay intact.
+- **Release blocker:** any failure blocks release.
 
-## Gate C — Policy firewall and prompt security
+## Gate C — Policy and audit safety (unit + integration)
 - [ ] `tests/test_policy_firewall.py` passed.
-- [ ] `tests/test_prompt_security.py` passed.
 - [ ] `tests/test_protection_policy_engine.py` passed.
-- **Release blocker:** any failure blocks release.
+- [ ] `tests/test_space_audit_integration_and_safety.py` passed.
+- **Release blocker:** any safety failure blocks release.
 
-## Gate D — Explainability and ranking reproducibility
-- [ ] `tests/test_recommendation_engine.py` passed.
+## Gate D — Watch monitor robustness (integration + soak + recovery)
+- [ ] `tests/test_free_space_watchdog.py` passed.
+- [ ] `tests/test_watchdog_soak_and_recovery.py` passed.
+- **Release blocker:** any cancellation/restart recovery failure blocks release.
+
+## Gate E — AI findings reproducibility and schema compatibility
 - [ ] `tests/test_ai_evidence_builder.py` passed.
+- [ ] `tests/test_recommendation_engine.py` passed.
 - [ ] `tests/test_golden_recommendations.py` passed.
-- **Release blocker:** any failure blocks release.
+- [ ] `tests/test_schema_compatibility_golden.py` passed.
+- **Release blocker:** any reproducibility or schema compatibility failure blocks release.
 
-## Gate E — Non-destructive invariants + privacy lint
-- [ ] `tests/test_cli_e2e_smoke.py` passed.
-- [ ] `tests/test_golden_plan_output.py` passed.
-- [ ] `tests/test_privacy_lint.py` passed.
-- **Release blocker:** any failure blocks release.
+## Gate F — Safety, integrity, reproducibility gate
+- [ ] Confirm CI workflow `release_blocker` failed closed on any Gate B/C/D/E failure.
+- [ ] Confirm no manual bypasses were used for gate failures.
+- **Release blocker:** release is blocked unless all safety, integrity, and reproducibility gates are green.
 
 ## Final release decision
-- [ ] Confirm the `release_blocker` workflow job succeeded (depends on Gates C/D/E).
+- [ ] Confirm the `release_blocker` workflow job succeeded (depends on Gates B/C/D/E/F).
 - [ ] Archive CI run URL and test summary with release notes.
