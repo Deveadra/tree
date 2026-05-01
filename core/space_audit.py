@@ -826,6 +826,7 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
                 "name": name,
                 "score": 0.0,
                 "observation": "inferred_suspect",
+                "attribution": "inferred",
                 "evidence": [],
             }
         return suspects[name]
@@ -841,6 +842,7 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
                 item["score"] += max(1.0, abs(delta) / (1024 * 1024)) * 1.2
                 if writer:
                     item["observation"] = "directly_observed_writer"
+                    item["attribution"] = "direct"
                 item["evidence"].append(
                     {
                         "type": "directory_growth_window",
@@ -864,15 +866,26 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
         item["score"] += max(1.0, abs(delta) / (1024 * 1024)) * 1.5
         if bool(row.get("direct_writer", False)):
             item["observation"] = "directly_observed_writer"
+            item["attribution"] = "direct"
         item["evidence"].append({"type": "process_io_delta", "reference": proc, "write_bytes_delta": delta})
 
-    ranked = sorted(suspects.values(), key=lambda x: x["score"], reverse=True)
-    evidence_disambiguation_hints = [
-        "Capture per-process file path write samples during the spike window.",
-        "Collect two adjacent snapshots (before/after) with top directory and extension deltas.",
-        "Enable process handle scan to confirm deleted-but-open space retention.",
-    ]
+    handle_rows = event_window.get("open_handle_deltas", []) or []
+    for row in handle_rows:
+        proc = str(row.get("process", "unknown"))
+        open_deleted = int(row.get("deleted_open_handles", 0))
+        if open_deleted <= 0:
+            continue
+        item = _touch(proc)
+        item["score"] += min(20.0, float(open_deleted) * 1.8)
+        if item["attribution"] != "direct":
+            item["observation"] = "probable_open_handle_not_released"
+        item["evidence"].append({
+            "type": "open_handle_delta",
+            "reference": proc,
+            "deleted_open_handles": open_deleted,
+        })
 
+    ranked = sorted(suspects.values(), key=lambda x: x["score"], reverse=True)
     process_rows = event_window.get("process_io_deltas", []) or []
     directory_rows = event_window.get("directory_growth_windows", []) or []
     io_has_direct = any(bool(row.get("direct_writer", False)) for row in process_rows)
@@ -884,6 +897,11 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
     if io_has_direct and dir_total == 0:
         contradiction_flags.append("process_io_direct_writer_without_directory_growth")
 
+    evidence_disambiguation_hints = [
+        "Capture optional per-process IO deltas inside the same growth window for stronger direct attribution.",
+        "Collect adjacent snapshots (before/after) with top directory and extension deltas.",
+        "Run process handle scan to verify deleted-but-open handle retention.",
+    ]
     if contradiction_flags:
         evidence_disambiguation_hints.append("Increase process IO sampling cadence; current signals conflict.")
 
@@ -891,45 +909,51 @@ def attribute_growth(event_window: dict[str, Any]) -> dict[str, Any]:
         score = float(item["score"])
         item["score"] = round(score, 2)
         evidence_count = len(item.get("evidence", []))
-        if score >= 20 and evidence_count >= 2 and item["observation"] == "directly_observed_writer":
+        has_open_handle = any(ev.get("type") == "open_handle_delta" for ev in item.get("evidence", []))
+        if score >= 20 and evidence_count >= 2 and item["attribution"] == "direct":
             item["confidence_tier"] = "high"
         elif score >= 8 and evidence_count >= 2:
             item["confidence_tier"] = "medium"
         else:
             item["confidence_tier"] = "low"
+        if has_open_handle and item["confidence_tier"] == "low":
+            item["confidence_tier"] = "medium"
         if item["confidence_tier"] in {"medium", "low"}:
-            item["alternate_hypotheses"] = [
-                "A background sync/cache process caused the growth.",
-            ]
-
-    confidence_summary = {
-        "tier_criteria": {
-            "high": "directly observed writer + >=2 evidence points + strong correlation score",
-            "medium": "moderate score with >=2 evidence points but incomplete direct attribution",
-            "low": "weak score or sparse/conflicting evidence",
-        },
-        "evidence_completeness": {
-            "directory_growth_windows": len(directory_rows),
-            "extension_surges": len(event_window.get("extension_surges", []) or []),
-            "process_io_deltas": len(process_rows),
-        },
-        "correlation_strength": {
-            "directory_growth_total_bytes": dir_total,
-            "process_io_total_write_bytes": io_total,
-        },
-    }
-    ambiguity_summary = {
-        "contradictions": contradiction_flags,
-        "what_evidence_would_disambiguate_this": evidence_disambiguation_hints,
-    }
+            item["alternate_hypotheses"] = ["A background sync/cache process caused the growth."]
 
     return {
         "event_id": event_window.get("event_id"),
         "window_start": event_window.get("window_start"),
         "window_end": event_window.get("window_end"),
         "suspects": ranked,
-        "confidence": confidence_summary,
-        "ambiguity": ambiguity_summary,
+        "confidence": {
+            "tier_criteria": {
+                "high": "direct attribution with strong multi-signal evidence",
+                "medium": "partial/direct mixed evidence or probable handle-retention signal",
+                "low": "weak or sparse evidence",
+            },
+            "evidence_completeness": {
+                "directory_growth_windows": len(directory_rows),
+                "extension_surges": len(event_window.get("extension_surges", []) or []),
+                "process_io_deltas": len(process_rows),
+                "open_handle_deltas": len(handle_rows),
+            },
+            "correlation_strength": {
+                "directory_growth_total_bytes": dir_total,
+                "process_io_total_write_bytes": io_total,
+            },
+        },
+        "ambiguity": {
+            "contradictions": contradiction_flags,
+            "what_evidence_would_disambiguate_this": evidence_disambiguation_hints,
+        },
+        "remediation": {
+            "safe_steps": [
+                "Close the likely application to release open handles.",
+                "Restart only the implicated app/service if space does not recover.",
+                "Reboot the machine only as a last resort.",
+            ]
+        },
     }
 
 
