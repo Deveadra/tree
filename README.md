@@ -9,8 +9,18 @@ Use `cli.py` with the following subcommands:
 - `plan-prune`
 - `apply-prune`
 - `report`
+- `diagnostic-bundle`
 
 All commands support human-readable output by default and machine-readable output with `--json`.
+
+## Supportability additions
+
+- One-click support bundle generation:
+  - `python cli.py diagnostic-bundle --report-dir reports --output reports/diagnostic_bundle.zip --telemetry-opt-in --json`
+- Structured `error.code` and `error.troubleshooting` payloads are returned for `apply-prune` validation failures when `--json` is enabled.
+- Telemetry is explicit opt-in (`--telemetry-opt-in`) and only adds debug session metadata to the bundle manifest.
+- Incident runbooks: `docs/runbooks_incidents.md`.
+- SLA/SLO targets: `docs/support_sla_slo.md`.
 
 ## Claim audit: safety workflow, plan/apply semantics, and rule tracing
 

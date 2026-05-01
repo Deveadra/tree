@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
+import zipfile
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +34,15 @@ from dupe_core import (
 
 PRUNE_PLAN_SCHEMA_VERSION = "1.0"
 
+ERROR_CODE_MAP = {
+    "PLAN_MISSING_FIELD": "Prune plan is missing required fields.",
+    "PLAN_SCHEMA_UNSUPPORTED": "Prune plan schema is not supported.",
+    "PLAN_VERSION_UNSUPPORTED": "Prune plan version is not supported.",
+    "PLAN_CHECKSUM_FAILED": "Prune plan integrity checksum failed verification.",
+    "POLICY_BLOCKED": "Action was blocked by protection policy.",
+    "CONFIRMATION_REQUIRED": "Destructive apply requires --no-dry-run and --yes.",
+}
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -54,12 +66,12 @@ def _file_snapshot(path: Path) -> dict[str, Any]:
 def _validate_plan_structure(plan: dict[str, Any]) -> None:
     for key in ("schema", "metadata", "actions", "plan_checksum"):
         if key not in plan:
-            raise ValueError(f"Missing required plan field: {key}")
+            raise ValueError(f"PLAN_MISSING_FIELD: Missing required plan field: {key}")
     if plan["schema"] != "plan-prune":
-        raise ValueError(f"Unsupported plan schema: {plan['schema']}")
+        raise ValueError(f"PLAN_SCHEMA_UNSUPPORTED: Unsupported plan schema: {plan['schema']}")
     meta = plan.get("metadata", {})
     if meta.get("plan_version") != PRUNE_PLAN_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported plan version: {meta.get('plan_version')}")
+        raise ValueError(f"PLAN_VERSION_UNSUPPORTED: Unsupported plan version: {meta.get('plan_version')}")
     for required_meta in ("generated_at", "source_id", "policy_firewall"):
         if required_meta not in meta:
             raise ValueError(f"Missing required plan metadata field: {required_meta}")
@@ -77,7 +89,7 @@ def _verify_plan_checksum(plan: dict[str, Any]) -> None:
     unsigned.pop("plan_checksum", None)
     actual = _sha256_json(unsigned)
     if not isinstance(expected, str) or expected != actual:
-        raise ValueError("Plan checksum verification failed")
+        raise ValueError("PLAN_CHECKSUM_FAILED: Plan checksum verification failed")
 
 
 def _run_pre_execution_guards(
@@ -113,7 +125,51 @@ def _run_pre_execution_guards(
 
     # 3) confirmation check
     if not dry_run and not yes:
-        raise ValueError("Refusing destructive action without --yes")
+        raise ValueError("CONFIRMATION_REQUIRED: Refusing destructive action without --yes")
+
+
+def generate_diagnostic_bundle(
+    report_dir: Path,
+    output_zip: Path,
+    include_patterns: list[str] | None = None,
+    telemetry_opt_in: bool = False,
+) -> dict[str, Any]:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    patterns = include_patterns or ["*.json", "*.jsonl", "*.txt", "*.csv", "*.log"]
+    included: list[str] = []
+
+    with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for pattern in patterns:
+            for p in sorted(report_dir.glob(pattern)):
+                if p.is_file():
+                    arcname = p.relative_to(report_dir)
+                    zf.write(p, arcname=str(arcname))
+                    included.append(str(arcname))
+
+        manifest = {
+            "generated_at": _utc_now_iso(),
+            "report_dir": str(report_dir),
+            "telemetry_opt_in": telemetry_opt_in,
+            "host": {
+                "platform": platform.platform(),
+                "python": platform.python_version(),
+            },
+            "error_codes": ERROR_CODE_MAP,
+            "included_files": included,
+        }
+        if telemetry_opt_in:
+            manifest["telemetry"] = {
+                "session_id": os.environ.get("TREE_SESSION_ID", "unset"),
+                "debug_mode": os.environ.get("TREE_DEBUG_MODE", "0"),
+            }
+        zf.writestr("diagnostic_manifest.json", json.dumps(manifest, indent=2))
+
+    return {
+        "bundle": str(output_zip),
+        "file_count": len(included),
+        "telemetry_opt_in": telemetry_opt_in,
+    }
 
 
 def scan_to_db(

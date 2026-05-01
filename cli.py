@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from core import service
@@ -82,6 +83,13 @@ def _parser() -> argparse.ArgumentParser:
     sa.add_argument("--exclude", action="append", default=[])
     sa.add_argument("--json", action="store_true", dest="as_json")
 
+    dbu = sub.add_parser("diagnostic-bundle", help="Generate one-click support diagnostics bundle")
+    dbu.add_argument("--report-dir", default="reports")
+    dbu.add_argument("--output", default="reports/diagnostic_bundle.zip")
+    dbu.add_argument("--include", action="append", default=[])
+    dbu.add_argument("--telemetry-opt-in", action="store_true")
+    dbu.add_argument("--json", action="store_true", dest="as_json")
+
     return p
 
 
@@ -101,6 +109,21 @@ def _emit(data, as_json: bool):
 
 def main() -> int:
     args = _parser().parse_args()
+    def _emit_structured_error(exc: Exception, as_json: bool) -> int:
+        message = str(exc)
+        code = message.split(":", 1)[0] if ":" in message else "UNEXPECTED_ERROR"
+        payload = {
+            "error": {
+                "code": code,
+                "message": message,
+                "troubleshooting": service.ERROR_CODE_MAP.get(code, "See docs/runbooks/incidents.md for troubleshooting steps."),
+            }
+        }
+        if as_json:
+            _emit(payload, as_json)
+        else:
+            print(message, file=sys.stderr)
+        return 2
 
     if args.cmd == "scan":
         report_dir = Path(args.report_dir)
@@ -134,16 +157,19 @@ def main() -> int:
         return 0
 
     if args.cmd == "apply-prune":
-        plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
-        result = service.apply_prune(
-            plan,
-            dry_run=args.dry_run,
-            yes=args.yes,
-            audit_log=Path(args.audit_log),
-            policy_path=Path(args.policy),
-        )
-        _emit(result, args.as_json)
-        return 0
+        try:
+            plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+            result = service.apply_prune(
+                plan,
+                dry_run=args.dry_run,
+                yes=args.yes,
+                audit_log=Path(args.audit_log),
+                policy_path=Path(args.policy),
+            )
+            _emit(result, args.as_json)
+            return 0
+        except ValueError as exc:
+            return _emit_structured_error(exc, args.as_json)
 
     if args.cmd == "report":
         groups = service.load_dupes(Path(args.db), compare_mode=args.compare)
@@ -257,6 +283,16 @@ def main() -> int:
             "watchdog": timeline_payload,
         }
         _emit(summary, args.as_json)
+        return 0
+
+    if args.cmd == "diagnostic-bundle":
+        payload = service.generate_diagnostic_bundle(
+            report_dir=Path(args.report_dir),
+            output_zip=Path(args.output),
+            include_patterns=args.include if args.include else None,
+            telemetry_opt_in=bool(args.telemetry_opt_in),
+        )
+        _emit(payload, args.as_json)
         return 0
 
     return 1
