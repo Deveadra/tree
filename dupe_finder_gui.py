@@ -31,8 +31,9 @@ from PySide6.QtCore import (
     Qt,
     Signal,
     Slot,
+    QSize,
 )
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -69,6 +70,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QToolButton,
     QMenu,
+    QStyle,
 )
 
 from core.service import (
@@ -722,6 +724,28 @@ class PrefixSuggestDialog(QDialog):
         return (list(self._result_prefixes), bool(self._result_add_to_top))
 
 
+
+class UITheme:
+    PALETTE = {
+        "surface": "#111827",
+        "surface_alt": "#1f2937",
+        "surface_card": "#0f172a",
+        "text": "#f9fafb",
+        "text_muted": "#cbd5e1",
+        "accent": "#38bdf8",
+        "warning": "#f59e0b",
+        "danger": "#ef4444",
+        "success": "#22c55e",
+        "focus": "#7dd3fc",
+        "border": "#334155",
+    }
+    TYPE_SCALE = {"xs": 11, "sm": 12, "md": 13, "lg": 16}
+    CORNER_RADIUS = 8
+    CONTROL_HEIGHT = 36
+    TOUCH_TARGET = 40
+    ICON_SIZE = 18
+
+
 # ----------------------------
 # Main Window
 # ----------------------------
@@ -743,6 +767,7 @@ class MainWindow(QMainWindow):
     }
     def __init__(self):
         super().__init__()
+        self._init_ui_system()
         self.setWindowTitle("Dupe Finder (GUI) — Size + SHA-256")
 
         self.icon_provider = QFileIconProvider()
@@ -1015,6 +1040,7 @@ class MainWindow(QMainWindow):
         self.keep_delete_btn = QPushButton("Delete Duplicates (Keep Selected)")
         self.open_file_btn = QPushButton("Open selected file")
         self.open_folder_btn = QPushButton("Open containing folder")
+        self._apply_action_icons()
 
         top = QWidget()
         self.setCentralWidget(top)
@@ -1022,8 +1048,7 @@ class MainWindow(QMainWindow):
         main.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
         main.setSpacing(SPACING_MD)
 
-        section_header_style = "QLabel { font-size: 15px; font-weight: 700; }"
-        self.start_btn.setStyleSheet("QPushButton { font-weight: 700; padding: 8px 14px; }")
+        section_header_style = f"QLabel {{ font-size: {UITheme.TYPE_SCALE['lg']}px; font-weight: 700; color: {UITheme.PALETTE['text']}; }}"
 
         scan_setup_header = QLabel("Scan Setup")
         scan_setup_header.setStyleSheet(section_header_style)
@@ -1218,6 +1243,7 @@ class MainWindow(QMainWindow):
         )
         self.menuBar().addAction(open_scan_err_action)
         self._apply_button_roles()
+        self._apply_modern_theme()
         self._apply_tooltips()
 
         open_hash_err_action = QAction("Open hash_errors.txt", self)
@@ -1692,6 +1718,64 @@ class MainWindow(QMainWindow):
             os.startfile(str(p))
         except Exception as e:
             QMessageBox.warning(self, "Open failed", str(e))
+
+
+    def _init_ui_system(self) -> None:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+        font = QFont()
+        font.setPointSize(UITheme.TYPE_SCALE["md"])
+        QApplication.instance().setFont(font)
+
+    def _apply_action_icons(self) -> None:
+        icon_map = {
+            self.start_btn: QStyle.StandardPixmap.SP_MediaPlay,
+            self.browse_root_btn: QStyle.StandardPixmap.SP_DirOpenIcon,
+            self.browse_root2_btn: QStyle.StandardPixmap.SP_DirOpenIcon,
+            self.browse_report_btn: QStyle.StandardPixmap.SP_DirOpenIcon,
+            self.open_reports_btn: QStyle.StandardPixmap.SP_DirOpenIcon,
+            self.open_folder_btn: QStyle.StandardPixmap.SP_DirOpenIcon,
+            self.open_file_btn: QStyle.StandardPixmap.SP_FileIcon,
+            self.keep_delete_btn: QStyle.StandardPixmap.SP_TrashIcon,
+            self.cancel_btn: QStyle.StandardPixmap.SP_BrowserStop,
+            self.load_btn: QStyle.StandardPixmap.SP_BrowserReload,
+        }
+        for widget, pix in icon_map.items():
+            icon = self.style().standardIcon(pix)
+            widget.setIcon(icon)
+            widget.setIconSize(QSize(UITheme.ICON_SIZE, UITheme.ICON_SIZE))
+
+    def _apply_modern_theme(self) -> None:
+        palette = UITheme.PALETTE
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: {palette['surface']};
+                color: {palette['text']};
+                font-size: {UITheme.TYPE_SCALE['md']}px;
+            }}
+            QGroupBox, QTabWidget::pane, QTableWidget, QTextEdit, QListWidget, QTreeWidget, QLineEdit, QComboBox, QSpinBox {{
+                background: {palette['surface_alt']};
+                border: 1px solid {palette['border']};
+                border-radius: {UITheme.CORNER_RADIUS}px;
+            }}
+            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox {{
+                min-height: {UITheme.TOUCH_TARGET}px;
+                border-radius: {UITheme.CORNER_RADIUS}px;
+                padding: 6px 10px;
+            }}
+            QPushButton:hover, QToolButton:hover {{ background: #243447; }}
+            QPushButton:pressed, QToolButton:pressed {{ background: #334155; }}
+            QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus,
+            QSpinBox:focus, QListWidget:focus, QTreeWidget:focus, QTableWidget:focus {{
+                border: 2px solid {palette['focus']};
+                outline: none;
+            }}
+            QLabel[statusRole="warning"] {{ color: {palette['warning']}; font-weight: 700; }}
+            QLabel[statusRole="danger"] {{ color: {palette['danger']}; font-weight: 700; }}
+            QLabel[statusRole="success"] {{ color: {palette['success']}; font-weight: 700; }}
+        """)
+        self.monitor_is_read_only_lbl.setProperty("statusRole", "danger")
+        self.monitor_alert_lbl.setProperty("statusRole", "success")
 
     def _apply_button_roles(self) -> None:
         primary_buttons = [
