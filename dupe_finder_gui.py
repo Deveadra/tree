@@ -832,6 +832,19 @@ class MainWindow(QMainWindow):
         self.ai_why_btn.setEnabled(False)
         self.ai_action_btn = QPushButton("Apply finding recommendation…")
         self.ai_action_btn.setEnabled(False)
+        self.investigate_btn = QPushButton("Investigate disappearing space…")
+        self.findings_summary = QTextEdit()
+        self.findings_summary.setReadOnly(True)
+        self.findings_summary.setPlaceholderText(
+            "Top findings, confidence, protected-zone warnings, and safe next steps will appear here."
+        )
+        self.findings_summary.setFixedHeight(180)
+        self.protected_warning_lbl = QLabel("")
+        self.protected_warning_lbl.setWordWrap(True)
+        self.protected_warning_lbl.setStyleSheet(
+            "QLabel { background: #fff3cd; color: #7a4f01; border: 1px solid #f0ad4e; padding: 6px; font-weight: 600; }"
+        )
+        self.protected_warning_lbl.hide()
         self.plan_state_combo = QComboBox()
         self.plan_state_combo.addItems(["draft", "reviewed", "approved", "executed"])
         self.plan_state_combo.setCurrentText("draft")
@@ -882,8 +895,12 @@ class MainWindow(QMainWindow):
         ai_actions = QHBoxLayout()
         ai_actions.addWidget(self.ai_why_btn)
         ai_actions.addWidget(self.ai_action_btn)
+        ai_actions.addWidget(self.investigate_btn)
         ai_actions.addStretch(1)
         monitor_layout.addLayout(ai_actions)
+        monitor_layout.addWidget(self.protected_warning_lbl)
+        monitor_layout.addWidget(QLabel("Investigation summary"))
+        monitor_layout.addWidget(self.findings_summary)
         monitor_layout.addWidget(self.open_evidence_btn)
         controls_form = QFormLayout()
         controls_form.addRow("Sampling interval:", self.monitor_interval_spin)
@@ -1085,6 +1102,7 @@ class MainWindow(QMainWindow):
 
         self.start_btn.clicked.connect(self.start_scan)
         self.space_audit_btn.clicked.connect(self.start_space_audit)
+        self.investigate_btn.clicked.connect(self.run_disappearing_space_wizard)
         self.cancel_btn.clicked.connect(self.cancel_scan)
         self.load_btn.clicked.connect(self.load_previous_scan)
         self.open_reports_btn.clicked.connect(self.open_current_report_folder)
@@ -1724,6 +1742,7 @@ class MainWindow(QMainWindow):
                 f"Artifacts: {self.report_dir}"
             )
             self.log(summary)
+            self._update_summary_pane(result)
             snapshots = result.get("snapshots", [])
             if snapshots:
                 self._refresh_monitor_panel(
@@ -1734,6 +1753,48 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Disk usage analysis", summary)
         self.space_audit_worker = None
         self.space_audit_thread = None
+
+    def _update_summary_pane(self, result: dict) -> None:
+        offenders = result.get("top_offenders", []) if isinstance(result.get("top_offenders"), list) else []
+        warnings = result.get("warnings", []) if isinstance(result.get("warnings"), list) else []
+        diffs = result.get("diff_summaries", []) if isinstance(result.get("diff_summaries"), list) else []
+        net = sum(int(d.get("net_change_bytes", 0)) for d in diffs)
+        top = offenders[:3]
+        top_lines = [
+            f"- {row.get('path', 'unknown')} ({format_bytes(int(row.get('bytes', 0)))})"
+            for row in top
+        ] or ["- none"]
+        confidence = "high" if top and abs(net) > 0 else "medium" if top else "low"
+        safe_next_steps = [
+            "Review top offenders and verify they are non-system data.",
+            "Use Recycle Bin mode first; avoid permanent delete.",
+            "Re-run analysis after each action to confirm reclaimed space.",
+        ]
+        self.findings_summary.setPlainText(
+            "Top findings\n"
+            + "\n".join(top_lines)
+            + f"\n\nConfidence: {confidence}\nNet change: {format_bytes(net)}"
+            + "\n\nSafe next steps\n"
+            + "\n".join(f"- {s}" for s in safe_next_steps)
+        )
+        if warnings:
+            self.protected_warning_lbl.setText(
+                f"Warning: {len(warnings)} protected/system-managed zone(s) were skipped or blocked."
+            )
+            self.protected_warning_lbl.show()
+        else:
+            self.protected_warning_lbl.hide()
+
+    def run_disappearing_space_wizard(self) -> None:
+        steps = (
+            "Investigate disappearing space wizard\n\n"
+            "1) Capture/compare current usage snapshot.\n"
+            "2) Review top growth offenders and confidence.\n"
+            "3) Confirm protected/system-managed warnings.\n"
+            "4) Execute only safe actions, then validate outcomes."
+        )
+        QMessageBox.information(self, "Investigation wizard", steps)
+        self.start_space_audit()
 
     @Slot(str)
     def on_space_audit_error(self, err: str) -> None:
@@ -2074,6 +2135,15 @@ class MainWindow(QMainWindow):
     ) -> tuple[list[str], list[tuple[str, str]]]:
         removed: list[str] = []
         failed: list[tuple[str, str]] = []
+        before_exists = {p: os.path.exists(p) for p in delete_paths}
+        before_prompt = QMessageBox.question(
+            self,
+            "Validate before actions",
+            "Before/after validation is enabled.\nProceed with selected action(s)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if before_prompt != QMessageBox.StandardButton.Yes:
+            return removed, [("operation", "user_cancelled_before_validation")]
 
         def try_recycle(p: str) -> None:
             result = execute_prune_plan(build_prune_plan([p], mode="recycle"))
@@ -2180,6 +2250,16 @@ class MainWindow(QMainWindow):
                     ),
                 )
 
+        post_ok = sum(1 for p in delete_paths if before_exists.get(p) and not os.path.exists(p))
+        outcome_msg = (
+            f"Outcome tracking:\n"
+            f"- Requested: {len(delete_paths)}\n"
+            f"- Removed/relocated: {len(removed)}\n"
+            f"- Validation passed: {post_ok}\n"
+            f"- Failed: {len(failed)}"
+        )
+        self.log(outcome_msg)
+        QMessageBox.information(self, "Post-action validation", outcome_msg)
         return removed, failed
 
     # The rest of your prune + load functions are unchanged in this recovery copy.
