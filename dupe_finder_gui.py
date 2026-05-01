@@ -750,9 +750,13 @@ class UITheme:
 # Main Window
 # ----------------------------
 
-SPACING_SM = 8
-SPACING_MD = 14
-SPACING_LG = 20
+class LayoutMetrics:
+    SPACING_SM = 8
+    SPACING_MD = 14
+    SPACING_LG = 20
+    FORM_ROW_SPACING = 8
+    FORM_LABEL_INPUT_SPACING = 14
+    CONTENT_MARGINS = 20
 
 
 
@@ -880,10 +884,8 @@ class MainWindow(QMainWindow):
 
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
-        self.status_box.setFixedHeight(110)
         self.last_run_summary = QTextEdit()
         self.last_run_summary.setReadOnly(True)
-        self.last_run_summary.setFixedHeight(90)
         self.last_run_summary.setPlaceholderText("Last run summary persists here.")
 
         self.tabs = QTabWidget()
@@ -902,7 +904,6 @@ class MainWindow(QMainWindow):
         self.monitor_spark_chart.addSeries(self.monitor_sparkline)
         self.monitor_spark_chart.createDefaultAxes()
         self.monitor_spark_view = QChartView(self.monitor_spark_chart)
-        self.monitor_spark_view.setMinimumHeight(120)
         self.monitor_spikes_table = QTableWidget(0, 5)
         self.monitor_spikes_table.setHorizontalHeaderLabels(
             ["Severity", "Time (UTC)", "Delta", "Top suspects", "Evidence bundle"]
@@ -931,7 +932,6 @@ class MainWindow(QMainWindow):
         self.findings_summary.setPlaceholderText(
             "Top findings, confidence, protected-zone warnings, and safe next steps will appear here."
         )
-        self.findings_summary.setFixedHeight(180)
         self.protected_warning_lbl = QLabel("")
         self.protected_warning_lbl.setWordWrap(True)
         self.protected_warning_lbl.setAccessibleName("Protected warning banner")
@@ -1075,8 +1075,8 @@ class MainWindow(QMainWindow):
         top = QWidget()
         self.setCentralWidget(top)
         main = QVBoxLayout(top)
-        main.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
-        main.setSpacing(SPACING_MD)
+        main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
+        main.setSpacing(LayoutMetrics.SPACING_MD)
 
         section_header_style = f"QLabel {{ font-size: {UITheme.TYPE_SCALE['lg']}px; font-weight: 700; color: {UITheme.PALETTE['text']}; }}"
 
@@ -1086,18 +1086,18 @@ class MainWindow(QMainWindow):
 
         scan_setup_card = QGroupBox()
         scan_setup_card_layout = QVBoxLayout(scan_setup_card)
-        scan_setup_card_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        scan_setup_card_layout.setSpacing(SPACING_MD)
+        scan_setup_card_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_MD)
 
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(SPACING_MD)
-        form.setVerticalSpacing(SPACING_SM)
+        form.setHorizontalSpacing(LayoutMetrics.FORM_LABEL_INPUT_SPACING)
+        form.setVerticalSpacing(LayoutMetrics.FORM_ROW_SPACING)
 
         basic_group = QGroupBox("Scan setup")
         basic_form = QFormLayout()
         root_row = QHBoxLayout()
-        root_row.setSpacing(SPACING_SM)
+        root_row.setSpacing(LayoutMetrics.SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
         self.root_badge = QLabel("")
@@ -1108,7 +1108,7 @@ class MainWindow(QMainWindow):
         basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
 
         root2_row = QHBoxLayout()
-        root2_row.setSpacing(SPACING_SM)
+        root2_row.setSpacing(LayoutMetrics.SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
         self.root2_badge = QLabel("")
@@ -1116,7 +1116,7 @@ class MainWindow(QMainWindow):
         basic_form.addRow("", self.root2_badge)
 
         rep_row = QHBoxLayout()
-        rep_row.setSpacing(SPACING_SM)
+        rep_row.setSpacing(LayoutMetrics.SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
         self.report_badge = QLabel("")
@@ -1151,6 +1151,13 @@ class MainWindow(QMainWindow):
         self.app_brand_lbl.setMinimumWidth(0)
         header_row.addWidget(self.app_brand_lbl, 1)
 
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(LayoutMetrics.SPACING_SM)
+        btn_row.addWidget(self.start_btn)
+        btn_row.addWidget(self.space_audit_btn)
+        btn_row.addWidget(self.cancel_btn)
+        btn_row.addWidget(self.load_btn)
+        btn_row.addWidget(self.open_reports_btn)
         self.start_btn.setText("Start")
         self.cancel_btn.setText("Cancel")
         header_row.addWidget(self.start_btn, 0)
@@ -1177,8 +1184,8 @@ class MainWindow(QMainWindow):
 
         left = QWidget()
         left_l = QVBoxLayout(left)
-        left_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        left_l.setSpacing(SPACING_SM)
+        left_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        left_l.setSpacing(LayoutMetrics.SPACING_SM)
         results_header = QLabel("Results")
         results_header.setStyleSheet(section_header_style)
         left_l.addWidget(results_header)
@@ -1200,8 +1207,8 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_l = QVBoxLayout(right)
-        right_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        right_l.setSpacing(SPACING_SM)
+        right_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        right_l.setSpacing(LayoutMetrics.SPACING_SM)
         actions_header_right = QLabel("Recommended Actions")
         actions_header_right.setStyleSheet(section_header_style)
         right_l.addWidget(actions_header_right)
@@ -1251,6 +1258,8 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 3)
 
         main.addWidget(splitter)
+
+        self._apply_size_policies()
 
         refresh_action = QAction("Clear results", self)
         refresh_action.triggered.connect(self.clear_results)
@@ -1753,6 +1762,47 @@ class MainWindow(QMainWindow):
         font = QFont()
         font.setPointSize(UITheme.TYPE_SCALE["md"])
         QApplication.instance().setFont(font)
+
+    def _apply_size_policies(self) -> None:
+        label_widgets = [
+            self.status_lbl,
+            self.scan_state_lbl,
+            self.remaining_lbl,
+            self.rclone_stats,
+            self.results_empty_lbl,
+            self.row_hint_lbl,
+            self.detail_size_card,
+            self.detail_mtime_card,
+            self.detail_path_card,
+        ]
+        for widget in label_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+        input_widgets = [
+            self.root_edit,
+            self.root2_edit,
+            self.report_edit,
+            self.exclude_input,
+            self.prefer_path_edit,
+            self.trash_folder_edit,
+            self.min_size_spin,
+            self.delete_mode,
+        ]
+        for widget in input_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        expanding_widgets = [
+            self.status_box,
+            self.last_run_summary,
+            self.tabs,
+            self.files_table,
+            self.findings_summary,
+            self.monitor_spikes_table,
+            self.ai_findings_table,
+            self.monitor_spark_view,
+        ]
+        for widget in expanding_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def _apply_action_icons(self) -> None:
         icon_map = {
@@ -2906,7 +2956,6 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     w = MainWindow()
-    w.resize(1200, 720)
     w.show()
     return app.exec()
 
