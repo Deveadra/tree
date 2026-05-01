@@ -1083,11 +1083,7 @@ class MainWindow(QMainWindow):
 
         section_header_style = f"QLabel {{ font-size: {UITheme.TYPE_SCALE['lg']}px; font-weight: 700; color: {UITheme.PALETTE['text']}; }}"
 
-        scan_setup_header = QLabel("Scan Setup")
-        scan_setup_header.setStyleSheet(section_header_style)
-        main.addWidget(scan_setup_header)
-
-        scan_setup_card = QGroupBox()
+        scan_setup_card = QGroupBox("Scan Setup")
         scan_setup_card_layout = QVBoxLayout(scan_setup_card)
         scan_setup_card_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
         scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_MD)
@@ -1179,8 +1175,9 @@ class MainWindow(QMainWindow):
         adv_group.setLayout(adv_form)
         form.addRow(adv_group)
         scan_setup_card_layout.addLayout(form)
-        main.addWidget(scan_setup_card)
-        self._update_scan_setup_layout_mode()
+        main.addWidget(scan_setup_card, 1)
+#         main.addWidget(scan_setup_card)
+#         self._update_scan_setup_layout_mode()
 
         header_row = QHBoxLayout()
         header_row.setSpacing(SPACING_SM)
@@ -1206,16 +1203,31 @@ class MainWindow(QMainWindow):
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tools_menu = QMenu(tools_menu_btn)
         header_row.addWidget(tools_menu_btn, 0)
-        main.addLayout(header_row)
+        actions_card = QGroupBox("Primary Actions")
+        actions_layout = QHBoxLayout(actions_card)
+        actions_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        actions_layout.setSpacing(LayoutMetrics.SPACING_SM)
+        actions_layout.addLayout(header_row)
+        main.addWidget(actions_card, 1)
 
-        main.addWidget(self.progress)
-        main.addWidget(self.status_lbl)
-        main.addWidget(self.scan_state_lbl)
-        main.addWidget(self.remaining_lbl)
-        main.addWidget(self.rclone_stats)
-        main.addWidget(QLabel("Last run summary"))
-        main.addWidget(self.last_run_summary)
-        main.addWidget(self.status_box)
+        status_card = QGroupBox("Status & Progress")
+        status_layout = QVBoxLayout(status_card)
+        status_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        status_layout.setSpacing(LayoutMetrics.SPACING_SM)
+        status_layout.addWidget(self.progress)
+        status_layout.addWidget(self.status_lbl)
+        status_layout.addWidget(self.scan_state_lbl)
+        status_layout.addWidget(self.remaining_lbl)
+        status_layout.addWidget(self.rclone_stats)
+        status_layout.addWidget(self.status_box)
+        main.addWidget(status_card, 1)
+
+        summary_card = QGroupBox("Last Run Summary")
+        summary_layout = QVBoxLayout(summary_card)
+        summary_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        summary_layout.setSpacing(LayoutMetrics.SPACING_SM)
+        summary_layout.addWidget(self.last_run_summary)
+        main.addWidget(summary_card, 1)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter = self.main_splitter
@@ -1240,7 +1252,7 @@ class MainWindow(QMainWindow):
         self.results_empty_lbl = QLabel("Run a scan to see duplicate groups.")
         self.results_empty_lbl.setStyleSheet("QLabel { color: #6b7280; font-style: italic; }")
         left_l.addWidget(self.results_empty_lbl)
-        left_l.addWidget(self.tabs)
+        left_l.addWidget(self.tabs, 1)
         splitter.addWidget(left)
 
         right = QWidget()
@@ -1251,7 +1263,7 @@ class MainWindow(QMainWindow):
         actions_header_right.setStyleSheet(section_header_style)
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
-        right_l.addWidget(self.files_table)
+        right_l.addWidget(self.files_table, 1)
         self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
         self.row_hint_lbl.setStyleSheet("QLabel { color: #4b5563; }")
         right_l.addWidget(self.row_hint_lbl)
@@ -1292,10 +1304,16 @@ class MainWindow(QMainWindow):
         right_l.addLayout(act_row)
 
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 4)
 
-        main.addWidget(splitter)
+        main.addWidget(splitter, 8)
+
+        main.setStretch(0, 1)
+        main.setStretch(1, 1)
+        main.setStretch(2, 1)
+        main.setStretch(3, 1)
+        main.setStretch(4, 8)
 
         self._apply_size_policies()
 
@@ -1779,11 +1797,20 @@ class MainWindow(QMainWindow):
 
     def _persist_last_run_summary(self, text: str) -> None:
         QSettings("DupeFinder", "DupeFinderGUI").setValue("last_run_summary", text)
+        self._refresh_summary_placeholders()
 
     def _restore_last_run_summary(self) -> None:
         text = QSettings("DupeFinder", "DupeFinderGUI").value("last_run_summary", "", type=str)
         if text:
             self.last_run_summary.setPlainText(text)
+        self._refresh_summary_placeholders()
+
+    def _refresh_summary_placeholders(self) -> None:
+        has_last_summary = bool(self.last_run_summary.toPlainText().strip())
+        if has_last_summary:
+            self.last_run_summary.setMaximumHeight(16777215)
+        else:
+            self.last_run_summary.setMaximumHeight(110)
 
     def _make_run_report_dir(self, reports_root: Path, scan_root: Path) -> Path:
         def safe_tag(s: str) -> str:
@@ -1884,6 +1911,11 @@ class MainWindow(QMainWindow):
         ]
         for widget in expanding_widgets:
             widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.tabs.setMinimumHeight(280)
+        self.files_table.setMinimumHeight(220)
+        self.findings_summary.setMinimumHeight(140)
+        self.last_run_summary.setMinimumHeight(80)
 
     def _apply_action_icons(self) -> None:
         icon_map = {
