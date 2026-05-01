@@ -228,6 +228,23 @@ def _build_explanation_payload(candidate: dict[str, Any], rec: dict[str, Any]) -
     }
 
 
+
+
+def _build_why_this_diagnostics(candidate: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any]:
+    root = rec.get("score_components", {}).get("root_cause", {})
+    reclaim = rec.get("score_components", {}).get("reclaim_opportunity", {})
+    top_root = sorted(root.items(), key=lambda item: (-_safe_float(item[1]), item[0]))[:2]
+    top_reclaim = sorted(reclaim.items(), key=lambda item: (-_safe_float(item[1]), item[0]))[:2]
+    return {
+        "primary_signals": [{"feature": k, "score": _safe_float(v)} for k, v in top_root],
+        "reclaim_signals": [{"feature": k, "score": _safe_float(v)} for k, v in top_reclaim],
+        "selected_over": list(candidate.get("alternatives", []))[:3],
+        "confidence": {
+            "score": rec.get("confidence_score", 0.0),
+            "band": "high" if _safe_float(rec.get("confidence_score", 0.0)) >= 0.75 else "medium" if _safe_float(rec.get("confidence_score", 0.0)) >= 0.45 else "low",
+        },
+    }
+
 def _build_approval_workflow(action_steps: list[dict[str, Any]]) -> dict[str, Any]:
     irreversible_tokens = [s.get("confirmation_token") for s in action_steps if s.get("requires_confirmation_token")]
     return {
@@ -313,6 +330,7 @@ def build_recommendations(
         }
 
         rec["explanation_payload"] = _build_explanation_payload(candidate, rec)
+        rec["why_this"] = _build_why_this_diagnostics(candidate, rec)
         rec["action_plan"] = {
             "schema_version": "1.0",
             "guardrails": {
@@ -450,7 +468,7 @@ def build_recommendations(
                 "fallback_count": telemetry.fallback_count,
                 "latency_ms": telemetry.latency_ms_total,
                 "failure_modes": dict(telemetry.failure_modes),
-                "elapsed_ms": int((time.perf_counter() - run_started) * 1000),
+                "elapsed_ms": 0,
             },
         },
     }
