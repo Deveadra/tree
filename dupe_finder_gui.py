@@ -830,7 +830,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._init_ui_system()
         self.setWindowTitle("Dupe Finder (GUI) — Size + SHA-256")
-        self.setMinimumSize(1024, 760)
+        self.setMinimumSize(1180, 820)
         self._compact_mode_breakpoint = 1180
 
         self.icon_provider = QFileIconProvider()
@@ -1110,9 +1110,10 @@ class MainWindow(QMainWindow):
         self.top_scroll = QScrollArea()
         self.top_scroll.setWidgetResizable(True)
         self.top_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.top_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.top_scroll_widget = QWidget()
         self.top_scroll.setWidget(self.top_scroll_widget)
-        root_layout.addWidget(self.top_scroll)
+        root_layout.addWidget(self.top_scroll, 0)
 
         main = QVBoxLayout(self.top_scroll_widget)
         main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
@@ -1278,6 +1279,7 @@ class MainWindow(QMainWindow):
         main.addWidget(summary_card, 1)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
         splitter = self.main_splitter
 
         left = QWidget()
@@ -1313,14 +1315,13 @@ class MainWindow(QMainWindow):
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table, 1)
-        self.files_table.setMinimumHeight(280)
-        self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
-        self.row_hint_lbl.setProperty("typographyRole", "caption")
+        self.row_hint_lbl = ElidedLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
+        self.row_hint_lbl.setStyleSheet("QLabel { color: #cbd5e1; }")
         self.row_hint_lbl.setProperty("typographyRole", "caption")
         right_l.addWidget(self.row_hint_lbl)
         self.detail_size_card = QLabel("Size: —")
         self.detail_mtime_card = QLabel("Modified: —")
-        self.detail_path_card = QLabel("Path health/protection: —")
+        self.detail_path_card = ElidedLabel("Path health/protection: —")
         for _card in (self.detail_size_card, self.detail_mtime_card, self.detail_path_card):
             _card.setProperty("labelRole", "detail_card")
             right_l.addWidget(_card)
@@ -1358,15 +1359,15 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 4)
 
-        main.addWidget(splitter, 10)
 
-        # Vertical hierarchy: setup+actions low, status low/fixed, results high.
-        main.setStretch(0, 0)  # setup header
-        main.setStretch(1, 1)  # setup card
-        main.setStretch(2, 0)  # primary actions
-        main.setStretch(3, 0)  # status/progress
-        main.setStretch(4, 0)  # collapsible summary
-        main.setStretch(5, 10)  # results + actions split
+        main.setStretch(0, 1)
+        main.setStretch(1, 1)
+        main.setStretch(2, 1)
+        main.setStretch(3, 1)
+        main.setStretch(4, 1)
+        main.setStretch(5, 1)
+
+        root_layout.addWidget(splitter, 1)
 
         self._apply_size_policies()
 
@@ -1489,6 +1490,7 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.exclude_add_btn, self.exclude_list)
         self._restore_ui_state()
         self._update_scan_setup_layout_mode()
+        self._update_splitter_layout_mode()
         self._update_compact_layout()
 
     def _set_form_layout_compact(self, form_layout: QFormLayout, compact: bool) -> None:
@@ -1547,7 +1549,8 @@ class MainWindow(QMainWindow):
     def _update_splitter_layout_mode(self) -> None:
         if not hasattr(self, "main_splitter"):
             return
-        desired = Qt.Orientation.Vertical if self.width() < self._compact_mode_breakpoint else Qt.Orientation.Horizontal
+        available_width = self.centralWidget().width() if self.centralWidget() else self.width()
+        desired = Qt.Orientation.Vertical if available_width < self._compact_mode_breakpoint else Qt.Orientation.Horizontal
         if self.main_splitter.orientation() != desired:
             self.main_splitter.setOrientation(desired)
             if desired == Qt.Orientation.Vertical:
@@ -1579,9 +1582,14 @@ class MainWindow(QMainWindow):
             ]
             overlaps = []
             for i, a in enumerate(controls):
-                ga = a.geometry()
+                ga_local = a.rect()
+                ga_top_left = a.mapToGlobal(ga_local.topLeft())
+                ga = ga_local.translated(ga_top_left)
                 for b in controls[i + 1:]:
-                    if ga.intersects(b.geometry()):
+                    gb_local = b.rect()
+                    gb_top_left = b.mapToGlobal(gb_local.topLeft())
+                    gb = gb_local.translated(gb_top_left)
+                    if ga.intersects(gb):
                         overlaps.append(f"{a.objectName() or a.__class__.__name__}:{b.objectName() or b.__class__.__name__}")
             checks.append((w, len(overlaps) == 0, ", ".join(overlaps) if overlaps else "no overlaps"))
         return checks
