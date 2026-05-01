@@ -817,6 +817,7 @@ class ElidedLineEdit(QLineEdit):
 
 class MainWindow(QMainWindow):
     SCAN_SETUP_COMPACT_BREAKPOINT = 1100
+    HEIGHT_COMPACT_BREAKPOINT = 850
     WARNING_TEXTS = {
         "risk_mode_blocked_title": "Risk mode transition blocked",
         "risk_mode_blocked_body": (
@@ -832,6 +833,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Dupe Finder (GUI) — Size + SHA-256")
         self.setMinimumSize(1180, 820)
         self._compact_mode_breakpoint = 1180
+        self._height_mode: Optional[str] = None
 
         self.icon_provider = QFileIconProvider()
         self.dupe_by_digest: dict[str, DupeGroup] = {}
@@ -1108,6 +1110,7 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
 
         main = QVBoxLayout()
+        self.main_layout = main
         main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
         main.setSpacing(LayoutMetrics.SPACING_MD)
         main.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
@@ -1119,6 +1122,7 @@ class MainWindow(QMainWindow):
 #         scan_setup_card = QGroupBox()
         scan_setup_card = QGroupBox("Scan Setup")
         scan_setup_card_layout = QVBoxLayout(scan_setup_card)
+        self.scan_setup_card_layout = scan_setup_card_layout
         scan_setup_card_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
         scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_MD)
 
@@ -1151,7 +1155,8 @@ class MainWindow(QMainWindow):
         self.basic_form.addRow("", self.root_badge)
 
         self.basic_form.addRow("", self.compare_mode_chk)
-        self.basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
+        self.compare_mode_help_lbl = QLabel("Compare mode scans both roots and only reports cross-root duplicates.")
+        self.basic_form.addRow("", self.compare_mode_help_lbl)
 
         self.root2_field_wrapper = QWidget()
         self.root2_field_layout = QGridLayout(self.root2_field_wrapper)
@@ -1198,7 +1203,8 @@ class MainWindow(QMainWindow):
         self.adv_form.addRow("Exclude tokens:", self.exclude_list)
         self.adv_form.addRow("", self.exclude_remove_btn)
         self.adv_form.addRow("", self.follow_symlinks_chk)
-        self.adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
+        self.symlink_help_lbl = QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier.")
+        self.adv_form.addRow("", self.symlink_help_lbl)
         adv_group.setLayout(self.adv_form)
 
         self.basic_group = basic_group
@@ -1281,6 +1287,7 @@ class MainWindow(QMainWindow):
         self.secondary_scroll_widget = QWidget()
         self.secondary_scroll.setWidget(self.secondary_scroll_widget)
         secondary_layout = QVBoxLayout(self.secondary_scroll_widget)
+        self.secondary_layout = secondary_layout
         secondary_layout.setContentsMargins(0, 0, 0, 0)
         secondary_layout.setSpacing(LayoutMetrics.SPACING_MD)
         main.addWidget(self.secondary_scroll, 1)
@@ -1379,6 +1386,18 @@ class MainWindow(QMainWindow):
         actions_layout.addWidget(self.suggest_keep_paths_btn)
         actions_layout.addWidget(self.suggest_paths_btn)
         actions_layout.addWidget(self.analyze_paths_btn)
+        self.condensed_actions_btn = QToolButton()
+        self.condensed_actions_btn.setText("Quick actions")
+        self.condensed_actions_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        condensed_actions_menu = QMenu(self.condensed_actions_btn)
+        condensed_actions_menu.addAction(self.auto_prune_btn.text(), self.auto_prune_by_preferred_path)
+        condensed_actions_menu.addAction(self.compare_prune_btn.text(), self.compare_prune_delete_a_using_b)
+        condensed_actions_menu.addAction(self.suggest_keep_paths_btn.text(), self.open_suggest_keep_paths)
+        condensed_actions_menu.addAction(self.suggest_paths_btn.text(), self.open_path_suggestions)
+        condensed_actions_menu.addAction(self.analyze_paths_btn.text(), self.analyze_paths_suggest_prefixes)
+        self.condensed_actions_btn.setMenu(condensed_actions_menu)
+        actions_layout.addWidget(self.condensed_actions_btn)
+        self.condensed_actions_btn.setVisible(False)
 
         del_row = QHBoxLayout()
         del_row.addWidget(QLabel("Delete mode:"))
@@ -1533,6 +1552,7 @@ class MainWindow(QMainWindow):
         self._update_scan_setup_layout_mode()
         self._update_splitter_layout_mode()
         self._update_compact_layout()
+        self._update_height_layout_mode()
 
     def _set_form_layout_compact(self, form_layout: QFormLayout, compact: bool) -> None:
         if compact:
@@ -1585,7 +1605,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._update_scan_setup_layout_mode()
         self._update_splitter_layout_mode()
-#         self._update_compact_layout()
+        self._update_height_layout_mode()
 
     def _update_splitter_layout_mode(self) -> None:
         if not hasattr(self, "main_splitter"):
@@ -1609,6 +1629,36 @@ class MainWindow(QMainWindow):
 
         for btn in self.primary_action_buttons:
             self.primary_actions_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignRight)
+
+    def _set_advanced_expanded(self, expanded: bool) -> None:
+        if self.advanced_toggle_btn.isChecked() != expanded:
+            self.advanced_toggle_btn.setChecked(expanded)
+        self.advanced_panel.setVisible(expanded)
+
+    def _update_height_layout_mode(self) -> None:
+        compact = self.height() < self.HEIGHT_COMPACT_BREAKPOINT
+        mode = "compact" if compact else "regular"
+        if mode == self._height_mode:
+            return
+        self._height_mode = mode
+
+        if compact:
+            self._set_advanced_expanded(False)
+
+        self.compare_mode_help_lbl.setVisible(not compact)
+        self.symlink_help_lbl.setVisible(not compact)
+        self.row_hint_lbl.setVisible(not compact)
+
+        self.main_layout.setContentsMargins(*( [LayoutMetrics.SPACING_MD] * 4 if compact else [LayoutMetrics.CONTENT_MARGINS] * 4 ))
+        self.main_layout.setSpacing(LayoutMetrics.SPACING_SM if compact else LayoutMetrics.SPACING_MD)
+        self.tier1_block_layout.setSpacing(LayoutMetrics.SPACING_SM if compact else LayoutMetrics.SPACING_MD)
+        self.scan_setup_card_layout.setContentsMargins(*( [LayoutMetrics.SPACING_SM] * 4 if compact else [LayoutMetrics.SPACING_MD] * 4 ))
+        self.scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_SM if compact else LayoutMetrics.SPACING_MD)
+        self.secondary_layout.setSpacing(LayoutMetrics.SPACING_SM if compact else LayoutMetrics.SPACING_MD)
+
+        self.condensed_actions_btn.setVisible(compact)
+        for btn in (self.auto_prune_btn, self.compare_prune_btn, self.suggest_keep_paths_btn, self.suggest_paths_btn, self.analyze_paths_btn):
+            btn.setVisible(not compact)
 
     def run_resize_sanity_checks(self) -> list[tuple[int, bool, str]]:
         widths = [900, 1100, 1366, 1920]
