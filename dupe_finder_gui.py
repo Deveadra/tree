@@ -63,6 +63,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QGroupBox,
+    QToolButton,
+    QMenu,
 )
 
 from core.service import (
@@ -720,6 +723,10 @@ class PrefixSuggestDialog(QDialog):
 # Main Window
 # ----------------------------
 
+SPACING_SM = 8
+SPACING_MD = 14
+SPACING_LG = 20
+
 
 class MainWindow(QMainWindow):
     WARNING_TEXTS = {
@@ -806,6 +813,7 @@ class MainWindow(QMainWindow):
         self.status_box.setFixedHeight(110)
 
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("QTabWidget::pane { padding: 12px; }")
         self.monitor_tab = QWidget()
         self.monitor_is_read_only_lbl = QLabel("Read-only monitor (no filesystem writes or delete actions).")
         self.monitor_is_read_only_lbl.setStyleSheet("QLabel { color: #8b0000; font-weight: 700; }")
@@ -981,10 +989,28 @@ class MainWindow(QMainWindow):
         top = QWidget()
         self.setCentralWidget(top)
         main = QVBoxLayout(top)
+        main.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
+        main.setSpacing(SPACING_MD)
+
+        section_header_style = "QLabel { font-size: 15px; font-weight: 700; }"
+        self.start_btn.setStyleSheet("QPushButton { font-weight: 700; padding: 8px 14px; }")
+
+        scan_setup_header = QLabel("Scan Setup")
+        scan_setup_header.setStyleSheet(section_header_style)
+        main.addWidget(scan_setup_header)
+
+        scan_setup_card = QGroupBox()
+        scan_setup_card_layout = QVBoxLayout(scan_setup_card)
+        scan_setup_card_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        scan_setup_card_layout.setSpacing(SPACING_MD)
 
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(SPACING_MD)
+        form.setVerticalSpacing(SPACING_SM)
 
         root_row = QHBoxLayout()
+        root_row.setSpacing(SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
         form.addRow("Root to scan:", root_row)
@@ -992,11 +1018,13 @@ class MainWindow(QMainWindow):
         form.addRow("", self.compare_mode_chk)
 
         root2_row = QHBoxLayout()
+        root2_row.setSpacing(SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
         form.addRow("Root B (compare):", root2_row)
 
         rep_row = QHBoxLayout()
+        rep_row.setSpacing(SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
         form.addRow("Reports root:", rep_row)
@@ -1004,17 +1032,30 @@ class MainWindow(QMainWindow):
         form.addRow("Min file size:", self.min_size_spin)
         form.addRow("Excludes (names or full paths):", self.exclude_edit)
         form.addRow("", self.follow_symlinks_chk)
+        scan_setup_card_layout.addLayout(form)
+        main.addWidget(scan_setup_card)
+
+        actions_header = QLabel("Primary Actions")
+        actions_header.setStyleSheet(section_header_style)
+        main.addWidget(actions_header)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING_SM)
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.space_audit_btn)
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.load_btn)
         btn_row.addWidget(self.open_reports_btn)
-        btn_row.addStretch(1)
-        form.addRow("", btn_row)
 
-        main.addLayout(form)
+        tools_menu_btn = QToolButton()
+        tools_menu_btn.setText("Tools / Logs")
+        tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tools_menu = QMenu(tools_menu_btn)
+
+        btn_row.addWidget(tools_menu_btn)
+        btn_row.addStretch(1)
+        main.addLayout(btn_row)
+
         main.addWidget(self.progress)
         main.addWidget(self.status_lbl)
         main.addWidget(self.remaining_lbl)
@@ -1025,11 +1066,21 @@ class MainWindow(QMainWindow):
 
         left = QWidget()
         left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        left_l.setSpacing(SPACING_SM)
+        results_header = QLabel("Results")
+        results_header.setStyleSheet(section_header_style)
+        left_l.addWidget(results_header)
         left_l.addWidget(self.tabs)
         splitter.addWidget(left)
 
         right = QWidget()
         right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        right_l.setSpacing(SPACING_SM)
+        actions_header_right = QLabel("Recommended Actions")
+        actions_header_right.setStyleSheet(section_header_style)
+        right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table)
 
@@ -1099,6 +1150,19 @@ class MainWindow(QMainWindow):
             lambda: self.open_report_file("deletion_log.txt")
         )
         self.menuBar().addAction(open_delete_log_action)
+
+        tools_menu.addAction(refresh_action)
+        tools_menu.addAction(open_reports_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(open_scan_err_action)
+        tools_menu.addAction(open_hash_err_action)
+        tools_menu.addAction(open_dupe_summary_action)
+        tools_menu.addAction(open_delete_log_action)
+        tools_menu_btn.setMenu(tools_menu)
+
+        neutral_btn_style = "QPushButton { font-weight: 500; }"
+        for _btn in (self.space_audit_btn, self.cancel_btn, self.load_btn, self.open_reports_btn):
+            _btn.setStyleSheet(neutral_btn_style)
 
         self.prefer_path_btn.clicked.connect(self.pick_prefer_path)
         self.auto_prune_btn.clicked.connect(self.auto_prune_by_preferred_path)
