@@ -1124,6 +1124,7 @@ class MainWindow(QMainWindow):
         main = QVBoxLayout(self.top_scroll_widget)
         main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
         main.setSpacing(LayoutMetrics.SPACING_MD)
+        main.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
         section_header_style = (
             f"QLabel {{ font-size: {UITheme.TYPOGRAPHY['section_header']['size']}px; "
@@ -1281,10 +1282,14 @@ class MainWindow(QMainWindow):
         main.addWidget(status_card, 1)
 
         summary_card = QGroupBox("Last Run Summary")
+        summary_card.setCheckable(True)
+        summary_card.setChecked(False)
         summary_layout = QVBoxLayout(summary_card)
         summary_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
         summary_layout.setSpacing(LayoutMetrics.SPACING_SM)
         summary_layout.addWidget(self.last_run_summary)
+        summary_card.toggled.connect(self.last_run_summary.setVisible)
+        self.last_run_summary.setVisible(summary_card.isChecked())
         main.addWidget(summary_card, 1)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1312,6 +1317,7 @@ class MainWindow(QMainWindow):
         self.results_empty_lbl.setStyleSheet("QLabel { color: #94a3b8; font-style: italic; }")
         left_l.addWidget(self.results_empty_lbl)
         left_l.addWidget(self.tabs, 1)
+        self.tabs.setMinimumHeight(320)
         splitter.addWidget(left)
 
         right = QWidget()
@@ -1324,6 +1330,7 @@ class MainWindow(QMainWindow):
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table, 1)
+        self.files_table.setMinimumHeight(280)
         self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
         self.row_hint_lbl.setStyleSheet("QLabel { color: #cbd5e1; }")
         self.row_hint_lbl.setProperty("typographyRole", "caption")
@@ -1368,14 +1375,15 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 4)
 
-        main.addWidget(splitter, 8)
+        main.addWidget(splitter, 10)
 
-        main.setStretch(0, 1)
-        main.setStretch(1, 1)
-        main.setStretch(2, 1)
-        main.setStretch(3, 1)
-        main.setStretch(4, 8)
-        main.setStretch(5, 8)
+        # Vertical hierarchy: setup+actions low, status low/fixed, results high.
+        main.setStretch(0, 0)  # setup header
+        main.setStretch(1, 1)  # setup card
+        main.setStretch(2, 0)  # primary actions
+        main.setStretch(3, 0)  # status/progress
+        main.setStretch(4, 0)  # collapsible summary
+        main.setStretch(5, 10)  # results + actions split
 
         self._apply_size_policies()
 
@@ -1916,9 +1924,9 @@ class MainWindow(QMainWindow):
     def _refresh_summary_placeholders(self) -> None:
         has_last_summary = bool(self.last_run_summary.toPlainText().strip())
         if has_last_summary:
-            self.last_run_summary.setMaximumHeight(16777215)
+            self.last_run_summary.setMaximumHeight(220)
         else:
-            self.last_run_summary.setMaximumHeight(110)
+            self.last_run_summary.setMaximumHeight(72)
 
     def _make_run_report_dir(self, reports_root: Path, scan_root: Path) -> Path:
         def safe_tag(s: str) -> str:
@@ -2020,10 +2028,10 @@ class MainWindow(QMainWindow):
         for widget in expanding_widgets:
             widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self.tabs.setMinimumHeight(0)
-        self.files_table.setMinimumHeight(0)
-        self.findings_summary.setMinimumHeight(0)
-        self.last_run_summary.setMinimumHeight(0)
+        self.tabs.setMinimumHeight(320)
+        self.files_table.setMinimumHeight(280)
+        self.findings_summary.setMinimumHeight(140)
+        self.last_run_summary.setMinimumHeight(72)
 
     def _apply_action_icons(self) -> None:
         icon_map = {
