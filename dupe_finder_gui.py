@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFileIconProvider,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -1240,22 +1241,38 @@ class MainWindow(QMainWindow):
         self.app_brand_lbl.setMinimumWidth(0)
         header_row.addWidget(self.app_brand_lbl, 1)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(LayoutMetrics.SPACING_SM)
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.space_audit_btn)
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.load_btn)
-        btn_row.addWidget(self.open_reports_btn)
         self.start_btn.setText("Start")
         self.cancel_btn.setText("Cancel")
-        header_row.addWidget(self.start_btn, 0)
-        header_row.addWidget(self.cancel_btn, 0)
 
         tools_menu_btn = QToolButton()
         tools_menu_btn.setText("Tools / Logs")
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tools_menu = QMenu(tools_menu_btn)
+
+        self.primary_actions_widget = QWidget()
+        self.primary_actions_layout = QGridLayout(self.primary_actions_widget)
+        self.primary_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.primary_actions_layout.setHorizontalSpacing(LayoutMetrics.SPACING_SM)
+        self.primary_actions_layout.setVerticalSpacing(LayoutMetrics.SPACING_SM)
+        self.primary_action_buttons = [
+            self.start_btn,
+            self.space_audit_btn,
+            self.cancel_btn,
+            self.load_btn,
+            self.open_reports_btn,
+            tools_menu_btn,
+        ]
+        header_row.addWidget(self.primary_actions_widget, 0)
+        main.addLayout(header_row)
+
+        main.addWidget(self.progress)
+        main.addWidget(self.status_lbl)
+        main.addWidget(self.scan_state_lbl)
+        main.addWidget(self.remaining_lbl)
+        main.addWidget(self.rclone_stats)
+        main.addWidget(QLabel("Last run summary"))
+        main.addWidget(self.last_run_summary)
+        main.addWidget(self.status_box)
         header_row.addWidget(tools_menu_btn, 0)
         actions_card = QGroupBox("Primary Actions")
         actions_layout = QHBoxLayout(actions_card)
@@ -1496,6 +1513,7 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.exclude_input, self.exclude_add_btn)
         self.setTabOrder(self.exclude_add_btn, self.exclude_list)
         self._restore_ui_state()
+        self._update_compact_layout()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1551,6 +1569,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._update_splitter_layout_mode()
+#         self._update_compact_layout()
 
     def _update_splitter_layout_mode(self) -> None:
         if not hasattr(self, "main_splitter"):
@@ -1562,6 +1581,23 @@ class MainWindow(QMainWindow):
                 self.main_splitter.setSizes([max(280, int(self.height() * 0.55)), max(240, int(self.height() * 0.45))])
             else:
                 self.main_splitter.setSizes([max(320, int(self.width() * 0.45)), max(320, int(self.width() * 0.55))])
+
+    def _update_compact_layout(self) -> None:
+        if not hasattr(self, "primary_actions_layout"):
+            return
+        while self.primary_actions_layout.count():
+            item = self.primary_actions_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().setParent(self.primary_actions_widget)
+
+        compact = self.width() < 1366
+        if compact:
+            cols = 3
+            for idx, btn in enumerate(self.primary_action_buttons):
+                self.primary_actions_layout.addWidget(btn, idx // cols, idx % cols)
+        else:
+            for idx, btn in enumerate(self.primary_action_buttons):
+                self.primary_actions_layout.addWidget(btn, 0, idx)
 
     def run_resize_sanity_checks(self) -> list[tuple[int, bool, str]]:
         widths = [900, 1100, 1366, 1920]
