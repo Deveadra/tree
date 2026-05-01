@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QMenu,
     QStyle,
+    QGridLayout,
 )
 
 from core.service import (
@@ -756,6 +757,7 @@ SPACING_LG = 20
 
 
 class MainWindow(QMainWindow):
+    SCAN_SETUP_COMPACT_BREAKPOINT = 1100
     WARNING_TEXTS = {
         "risk_mode_blocked_title": "Risk mode transition blocked",
         "risk_mode_blocked_body": (
@@ -1059,65 +1061,79 @@ class MainWindow(QMainWindow):
         scan_setup_card_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
         scan_setup_card_layout.setSpacing(SPACING_MD)
 
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(SPACING_MD)
-        form.setVerticalSpacing(SPACING_SM)
+        self._scan_setup_mode = None
+        self.scan_setup_grid = QGridLayout()
+        self.scan_setup_grid.setContentsMargins(0, 0, 0, 0)
+        self.scan_setup_grid.setHorizontalSpacing(SPACING_MD)
+        self.scan_setup_grid.setVerticalSpacing(SPACING_SM)
 
         basic_group = QGroupBox("Scan setup")
-        basic_form = QFormLayout()
+        self.basic_form = QFormLayout()
+        self.basic_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.basic_form.setContentsMargins(0, 0, 0, 0)
+        self.basic_form.setHorizontalSpacing(SPACING_MD)
+        self.basic_form.setVerticalSpacing(SPACING_SM)
         root_row = QHBoxLayout()
         root_row.setSpacing(SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
+        root_row.setStretch(0, 1)
         self.root_badge = QLabel("")
-        basic_form.addRow("Root to scan:", root_row)
-        basic_form.addRow("", self.root_badge)
+        self.basic_form.addRow("Root to scan:", root_row)
+        self.basic_form.addRow("", self.root_badge)
 
-        basic_form.addRow("", self.compare_mode_chk)
-        basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
+        self.basic_form.addRow("", self.compare_mode_chk)
+        self.basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
 
         root2_row = QHBoxLayout()
         root2_row.setSpacing(SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
+        root2_row.setStretch(0, 1)
         self.root2_badge = QLabel("")
-        basic_form.addRow("Root B (compare):", root2_row)
-        basic_form.addRow("", self.root2_badge)
+        self.basic_form.addRow("Root B (compare):", root2_row)
+        self.basic_form.addRow("", self.root2_badge)
 
         rep_row = QHBoxLayout()
         rep_row.setSpacing(SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
+        rep_row.setStretch(0, 1)
         self.report_badge = QLabel("")
-        basic_form.addRow("Reports root:", rep_row)
-        basic_form.addRow("", self.report_badge)
+        self.basic_form.addRow("Reports root:", rep_row)
+        self.basic_form.addRow("", self.report_badge)
 
-        basic_form.addRow("Min file size:", self.min_size_spin)
-        basic_group.setLayout(basic_form)
-        form.addRow(basic_group)
+        self.basic_form.addRow("Min file size:", self.min_size_spin)
+        basic_group.setLayout(self.basic_form)
 
         adv_group = QGroupBox("Advanced")
         adv_group.setCheckable(True)
         adv_group.setChecked(False)
-        adv_form = QFormLayout()
+        self.adv_form = QFormLayout()
+        self.adv_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.adv_form.setContentsMargins(0, 0, 0, 0)
+        self.adv_form.setHorizontalSpacing(SPACING_MD)
+        self.adv_form.setVerticalSpacing(SPACING_SM)
         ex_row = QHBoxLayout()
         ex_row.addWidget(self.exclude_input)
         ex_row.addWidget(self.exclude_add_btn)
-        adv_form.addRow("Add exclude token:", ex_row)
-        adv_form.addRow("Exclude tokens:", self.exclude_list)
-        adv_form.addRow("", self.exclude_remove_btn)
-        adv_form.addRow("", self.follow_symlinks_chk)
-        adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
-        adv_group.setLayout(adv_form)
-        form.addRow(adv_group)
-        form.addRow("Reports root:", rep_row)
+        ex_row.setStretch(0, 1)
+        self.adv_form.addRow("Add exclude token:", ex_row)
+        self.adv_form.addRow("Exclude tokens:", self.exclude_list)
+        self.adv_form.addRow("", self.exclude_remove_btn)
+        self.adv_form.addRow("", self.follow_symlinks_chk)
+        self.adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
+        adv_group.setLayout(self.adv_form)
 
-        form.addRow("Min file size:", self.min_size_spin)
-        form.addRow("Excludes (names or full paths):", self.exclude_edit)
-        form.addRow("", self.follow_symlinks_chk)
-        scan_setup_card_layout.addLayout(form)
+        self.basic_group = basic_group
+        self.adv_group = adv_group
+        self.scan_setup_grid.addWidget(self.basic_group, 0, 0)
+        self.scan_setup_grid.addWidget(self.adv_group, 0, 1)
+        self.scan_setup_grid.setColumnStretch(0, 1)
+        self.scan_setup_grid.setColumnStretch(1, 1)
+        scan_setup_card_layout.addLayout(self.scan_setup_grid)
         main.addWidget(scan_setup_card)
+        self._update_scan_setup_layout_mode()
 
         actions_header = QLabel("Primary Actions")
         actions_header.setStyleSheet(section_header_style)
@@ -1346,6 +1362,54 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.exclude_input, self.exclude_add_btn)
         self.setTabOrder(self.exclude_add_btn, self.exclude_list)
         self._restore_ui_state()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_scan_setup_layout_mode()
+
+    def _set_form_layout_compact(self, form_layout: QFormLayout, compact: bool) -> None:
+        if compact:
+            form_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+            form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        else:
+            form_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+            form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+    def _update_scan_setup_layout_mode(self) -> None:
+        compact = self.width() < self.SCAN_SETUP_COMPACT_BREAKPOINT
+        mode = "compact" if compact else "wide"
+        if mode == self._scan_setup_mode:
+            return
+        self._scan_setup_mode = mode
+
+        self.scan_setup_grid.removeWidget(self.basic_group)
+        self.scan_setup_grid.removeWidget(self.adv_group)
+
+        if compact:
+            self.scan_setup_grid.addWidget(self.basic_group, 0, 0, 1, 2)
+            self.scan_setup_grid.addWidget(self.adv_group, 1, 0, 1, 2)
+        else:
+            self.scan_setup_grid.addWidget(self.basic_group, 0, 0)
+            self.scan_setup_grid.addWidget(self.adv_group, 0, 1)
+        self.scan_setup_grid.setColumnStretch(0, 1)
+        self.scan_setup_grid.setColumnStretch(1, 1)
+
+        self._set_form_layout_compact(self.basic_form, compact)
+        self._set_form_layout_compact(self.adv_form, compact)
+
+        self.adv_form.removeRow(0)
+        self.adv_form.removeRow(0)
+        if compact:
+            self.adv_form.insertRow(0, "Add exclude token:", self.exclude_input)
+            self.adv_form.insertRow(1, "", self.exclude_add_btn)
+        else:
+            ex_row = QHBoxLayout()
+            ex_row.addWidget(self.exclude_input)
+            ex_row.addWidget(self.exclude_add_btn)
+            ex_row.setStretch(0, 1)
+            self.adv_form.insertRow(0, "Add exclude token:", ex_row)
 
     def _set_badge(self, lbl: QLabel, text: str) -> None:
         if text:
