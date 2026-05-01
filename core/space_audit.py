@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +21,7 @@ else:
 from config.protection_loader import DEFAULT_TOML, ProtectionConfig, resolve_protection_config
 from core.protection_policy import contains_protected_dir_name, is_under_protected_prefix, is_within_safe_delete_roots
 
-from dupe_core import safe_mkdir, write_json_atomic
+from dupe_core import safe_mkdir, write_checksum_sidecar, write_json_atomic
 from core.ai.evidence_builder import build_normalized_evidence, persist_normalized_evidence
 from core.space_categories import classify_path
 from core.collector_plugins import load_collector_plugins, run_plugins_safely
@@ -1380,6 +1380,9 @@ def sample_correlated_space_timeline(
     restart_state_path: str | Path | None = None,
     max_cpu_seconds: int | None = None,
     max_memory_bytes: int | None = None,
+    max_in_memory_rows: int = 1000,
+    degraded_api_failure_threshold: int = 5,
+    degraded_growth_backoff_seconds: float = 30.0,
     cancel_flag: Any | None = None,
 ) -> dict[str, Any]:
     """Capture two correlated telemetry streams with drift-safe monotonic scheduling.
@@ -1405,10 +1408,13 @@ def sample_correlated_space_timeline(
     fast_rows = 0
     growth_rows = 0
     prev_snapshot: dict[str, Any] | None = None
-    growth_rows_payload: list[dict[str, Any]] = []
-    fast_rows_payload: list[dict[str, Any]] = []
+    bounded_rows = max(10, int(max_in_memory_rows))
+    growth_rows_payload: deque[dict[str, Any]] = deque(maxlen=bounded_rows)
+    fast_rows_payload: deque[dict[str, Any]] = deque(maxlen=bounded_rows)
     cancelled = False
     degradation: dict[str, Any] = {"sampling_lag_events": 0, "missed_ticks": 0, "api_failures": 0}
+    degraded_mode = False
+    degraded_until: float | None = None
     heartbeat_file = Path(heartbeat_path) if heartbeat_path else (fast_path.parent / "collector_heartbeat.json")
     hb_interval = max(0.1, float(heartbeat_interval_seconds))
     live_timeout = max(hb_interval, float(liveness_timeout_seconds))
@@ -1492,12 +1498,18 @@ def sample_correlated_space_timeline(
                 degradation["missed_ticks"] += max(0, skipped - 1)
 
             if now >= next_growth and (max_growth_rows is None or growth_rows < max_growth_rows):
+                if degraded_mode and degraded_until is not None and now < degraded_until:
+                    next_growth = now + max(0.5, float(degraded_growth_backoff_seconds))
+                    continue
                 seq += 1
                 event_id = f"evt-{seq:08d}"
                 try:
                     current_snapshot = scan_space_usage(root=root_path, excludes=[], depth=2, audit_mode=True)
                 except OSError:
                     degradation["api_failures"] += 1
+                    if degradation["api_failures"] >= max(1, int(degraded_api_failure_threshold)):
+                        degraded_mode = True
+                        degraded_until = now + max(0.5, float(degraded_growth_backoff_seconds))
                     next_growth += max(0.001, float(growth_interval_seconds))
                     continue
                 tree_delta = 0
@@ -1527,6 +1539,9 @@ def sample_correlated_space_timeline(
                 prev_snapshot = current_snapshot
                 growth_rows += 1
                 did_work = True
+                if degraded_mode:
+                    degraded_mode = False
+                    degraded_until = None
                 growth_interval = max(0.001, float(growth_interval_seconds))
                 skipped = 0
                 while next_growth <= now:
@@ -1538,11 +1553,13 @@ def sample_correlated_space_timeline(
                 liveness = "alive" if (now - last_heartbeat) <= live_timeout else "degraded"
                 payload = {
                     "timestamp": _utc_now_iso(),
-                    "liveness": liveness,
+                    "liveness": "degraded" if degraded_mode else liveness,
                     "seq": seq,
                     "fast_rows": fast_rows,
                     "growth_rows": growth_rows,
                     "degradation": degradation,
+                    "degraded_mode": degraded_mode,
+                    "degraded_until_monotonic": degraded_until,
                 }
                 write_json_atomic(heartbeat_file, payload)
                 _append_row_safe(heartbeat_file.with_suffix(".log"), json.dumps(payload, sort_keys=True) + "\n")
@@ -1581,9 +1598,14 @@ def sample_correlated_space_timeline(
         "growth_rows_written": growth_rows,
         "correlation_windows": correlation_windows,
         "degradation": degradation,
+        "degraded_mode": degraded_mode,
+        "in_memory_row_cap": bounded_rows,
     }
     partial_report_path = fast_path.parent / "correlated_timeline_partial_report.json"
     write_json_atomic(partial_report_path, partial_report)
+    fast_checksum = write_checksum_sidecar(fast_path)
+    growth_checksum = write_checksum_sidecar(growth_path)
+    report_checksum = write_checksum_sidecar(partial_report_path)
     return {
         "root": str(root_path),
         "output_fast_csv": str(fast_path),
@@ -1597,5 +1619,10 @@ def sample_correlated_space_timeline(
         "state_path": str(state_file),
         "degradation": degradation,
         "partial_report_path": str(partial_report_path),
+        "artifact_checksums": {
+            str(fast_path): fast_checksum,
+            str(growth_path): growth_checksum,
+            str(partial_report_path): report_checksum,
+        },
         "correlation_windows": correlation_windows,
     }

@@ -481,8 +481,23 @@ def write_json_atomic(path: Path, data: dict) -> None:
     Writes JSON atomically (temp file + replace) so we don't end up with a half-written meta file.
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, indent=2))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
+
+
+def write_checksum_sidecar(path: Path) -> str:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(f"{digest}  {path.name}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, sidecar)
+    return digest
 
 
 RUN_STATES = {
