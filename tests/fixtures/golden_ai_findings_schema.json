@@ -1,0 +1,18 @@
+{
+  "required_top_level_keys": [
+    "schema_version",
+    "run_id",
+    "event_id",
+    "generated_at",
+    "space_audit_snapshot_features",
+    "monitor_timeline_features",
+    "protection_policy_state",
+    "user_notes_context",
+    "external_model_provider_usage",
+    "export_tiers"
+  ],
+  "required_export_tiers": [
+    "full_forensic_report",
+    "share_safe_redacted_report"
+  ]
+}

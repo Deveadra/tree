@@ -1,0 +1,13 @@
+{
+  "required_keys": {
+    "snapshot": ["schema_version", "run", "totals", "tree", "extensions", "categories", "protection"],
+    "top_dirs": ["schema_version", "generated_at", "rows"],
+    "by_extension": ["schema_version", "generated_at", "rows"],
+    "usage_by_dir": ["schema_version", "generated_at", "rows"],
+    "usage_by_ext": ["schema_version", "generated_at", "rows"],
+    "audit_summary": ["schema_version", "generated_at", "summary"],
+    "audit_meta": ["schema_version", "generated_at", "run", "artifacts"],
+    "diff": ["schema_version", "run", "config", "totals", "summary", "tree", "extensions"],
+    "timeline_row": ["schema_version", "row"]
+  }
+}
