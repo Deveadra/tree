@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QStyle,
     QGridLayout,
+    QBoxLayout,
 )
 
 from core.service import (
@@ -1114,11 +1115,11 @@ class MainWindow(QMainWindow):
         self.adv_form.setContentsMargins(0, 0, 0, 0)
         self.adv_form.setHorizontalSpacing(SPACING_MD)
         self.adv_form.setVerticalSpacing(SPACING_SM)
-        ex_row = QHBoxLayout()
-        ex_row.addWidget(self.exclude_input)
-        ex_row.addWidget(self.exclude_add_btn)
-        ex_row.setStretch(0, 1)
-        self.adv_form.addRow("Add exclude token:", ex_row)
+        self.exclude_token_row = QHBoxLayout()
+        self.exclude_token_row.addWidget(self.exclude_input)
+        self.exclude_token_row.addWidget(self.exclude_add_btn)
+        self.exclude_token_row.setStretch(0, 1)
+        self.adv_form.addRow("Add exclude token:", self.exclude_token_row)
         self.adv_form.addRow("Exclude tokens:", self.exclude_list)
         self.adv_form.addRow("", self.exclude_remove_btn)
         self.adv_form.addRow("", self.follow_symlinks_chk)
@@ -1399,17 +1400,12 @@ class MainWindow(QMainWindow):
         self._set_form_layout_compact(self.basic_form, compact)
         self._set_form_layout_compact(self.adv_form, compact)
 
-        self.adv_form.removeRow(0)
-        self.adv_form.removeRow(0)
         if compact:
-            self.adv_form.insertRow(0, "Add exclude token:", self.exclude_input)
-            self.adv_form.insertRow(1, "", self.exclude_add_btn)
+            self.exclude_token_row.setDirection(QBoxLayout.Direction.TopToBottom)
+            self.exclude_add_btn.setMaximumWidth(140)
         else:
-            ex_row = QHBoxLayout()
-            ex_row.addWidget(self.exclude_input)
-            ex_row.addWidget(self.exclude_add_btn)
-            ex_row.setStretch(0, 1)
-            self.adv_form.insertRow(0, "Add exclude token:", ex_row)
+            self.exclude_token_row.setDirection(QBoxLayout.Direction.LeftToRight)
+            self.exclude_add_btn.setMaximumWidth(16777215)
 
     def _set_badge(self, lbl: QLabel, text: str) -> None:
         if text:
