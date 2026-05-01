@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import getpass
 import hashlib
 import json
 import os
@@ -11,13 +12,16 @@ import shutil
 import stat
 import sqlite3
 import time
+import uuid
 
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from config.excludes_loader import load_exclude_prefixes
+from config.path_rules import canonicalize_path, evaluate_rules, validate_rule_inputs
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Optional
+from uuid import uuid4
 
 
 # ----------------------------
@@ -32,6 +36,12 @@ class FileRec:
     size: int
     mtime: float
     root_id: int = 0  # 0=Root A, 1=Root B (compare mode)
+    inode: Optional[int] = None
+    device_id: Optional[int] = None
+    ctime: Optional[float] = None
+    nlink: Optional[int] = None
+    ext_hint: str = ""
+    mime_hint: str = ""
 
 
 @dataclass
@@ -41,8 +51,52 @@ class DupeGroup:
     files: list[FileRec]
 
 
+@dataclass(frozen=True)
+class PruneCandidate:
+    path: str
+    size: int
+    mtime: float
+    reason_codes: list[str]
+    risk_flags: list[str]
+
+
+@dataclass(frozen=True)
+class ApplyResult:
+    path: str
+    action: str
+    status: str
+    detail: str
+    ts_utc: str
+
+
 # Normalized (case-insensitive on Windows) path prefixes loaded from config/excludes.toml
 DEFAULT_EXCLUDES: list[str] = load_exclude_prefixes()
+PROTECTED_PATH_DENYLIST: tuple[str, ...] = (
+    r"C:\Windows",
+    r"C:\Program Files",
+    r"C:\Program Files (x86)",
+    r"C:\ProgramData",
+    r"C:\$Recycle.Bin",
+    r"C:\System Volume Information",
+    r"\\?\GLOBALROOT",
+)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    return v in {"1", "true", "yes", "on"}
+
+
+SCAN_ERROR_BUDGET_DEFAULT = _env_int("DUPE_SCAN_ERROR_BUDGET", 1000)
+SCAN_TREE_DEPTH_CAP_DEFAULT = _env_int("DUPE_SCAN_TREE_DEPTH_CAP", 256)
+SCAN_PROFILE_DEFAULT = _env_bool("DUPE_SCAN_PROFILE", False)
 
 
 # ----------------------------
@@ -51,14 +105,7 @@ DEFAULT_EXCLUDES: list[str] = load_exclude_prefixes()
 
 
 def _norm_path_str(p: str) -> str:
-    """
-    Normalize a path string for reliable Windows comparisons:
-      - expand %VARS%
-      - normpath
-      - normcase (case-insensitive on Windows)
-    """
-    expanded = os.path.expandvars(p)
-    return os.path.normcase(os.path.normpath(expanded))
+    return canonicalize_path(p).canonical
 
 
 def _looks_like_path_prefix(s: str) -> bool:
@@ -98,6 +145,10 @@ def compile_excludes(excludes: set[str]) -> tuple[set[str], list[str]]:
     dir_names: set[str] = set()
     prefixes: list[str] = []
 
+    warn = validate_rule_inputs(excludes)
+    for w in warn:
+        print(f"[exclude-warning] {w}")
+
     # 1) User-provided excludes
     for raw in excludes:
         s = (raw or "").strip()
@@ -134,16 +185,7 @@ def is_under_any_prefix(p: Path, prefixes: list[str]) -> bool:
     """
     ps = _norm_path_str(str(p))
     for pref in prefixes:
-        if not pref:
-            continue
-
-        # Drive-root prefix like "E:\"
-        if pref.endswith(os.sep):
-            if ps.startswith(pref):
-                return True
-            continue
-
-        if ps == pref or ps.startswith(pref + os.sep):
+        if evaluate_rules(ps, [], [pref])[0] is False:
             return True
 
     return False
@@ -237,6 +279,135 @@ def fmt_time(epoch: float) -> str:
         return str(epoch)
 
 
+def utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _normalized_plan_payload(plan: dict[str, Any]) -> bytes:
+    # Signature always excludes itself.
+    to_sign = dict(plan)
+    to_sign.pop("plan_signature", None)
+    return json.dumps(to_sign, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def compute_plan_signature(plan: dict[str, Any]) -> str:
+    return hashlib.sha256(_normalized_plan_payload(plan)).hexdigest()
+
+
+def validate_plan_signature(plan: dict[str, Any]) -> bool:
+    sig = str(plan.get("plan_signature", ""))
+    return bool(sig) and sig == compute_plan_signature(plan)
+
+
+def write_prune_plan(
+    artifact_path: Path,
+    *,
+    roots: list[str],
+    excludes: list[str],
+    compare_mode: bool,
+    candidates: list[PruneCandidate],
+    dry_run: bool,
+    plan_id: Optional[str] = None,
+) -> dict[str, Any]:
+    if not plan_id:
+        plan_id = hashlib.sha256(f"{utc_now_iso()}|{'|'.join(sorted(roots))}".encode("utf-8")).hexdigest()[:12]
+
+    plan: dict[str, Any] = {
+        "plan_id": plan_id,
+        "metadata": {
+            "roots": roots,
+            "excludes": excludes,
+            "compare_mode": compare_mode,
+            "generated_at_utc": utc_now_iso(),
+            "dry_run": dry_run,
+        },
+        "candidates": [
+            {
+                "path": c.path,
+                "size": int(c.size),
+                "mtime": float(c.mtime),
+                "reason_codes": c.reason_codes,
+                "risk_flags": c.risk_flags,
+            }
+            for c in candidates
+        ],
+        "aggregate": {
+            "candidate_count": len(candidates),
+            "bytes_to_reclaim": sum(int(c.size) for c in candidates),
+        },
+    }
+    plan["plan_signature"] = compute_plan_signature(plan)
+    artifact_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    return plan
+
+
+def _is_writable_dir(path: Path) -> bool:
+    try:
+        safe_mkdir(path)
+        probe = path / f".write_test_{time.time_ns()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def apply_prune_plan(
+    plan: dict[str, Any],
+    *,
+    confirmation_token: Optional[str],
+    require_confirmation: bool,
+    dry_run: bool,
+    destination_dir: Optional[Path],
+    events_path: Path,
+    apply_fn: Callable[[str], None],
+) -> list[ApplyResult]:
+    if not validate_plan_signature(plan):
+        raise ValueError("Invalid plan signature; refusing apply.")
+
+    expected = f"APPLY PLAN {plan.get('plan_id', '')}"
+    if require_confirmation and confirmation_token != expected:
+        raise ValueError(f"Confirmation token required: '{expected}'")
+
+    # In dry-run mode we must avoid any destination probe side effects.
+    # _is_writable_dir() creates the directory and a temporary file.
+    if destination_dir is not None and not dry_run:
+        if not _is_writable_dir(destination_dir):
+            raise RuntimeError(f"Destination is not writable: {destination_dir}")
+
+    results: list[ApplyResult] = []
+    for c in plan.get("candidates", []):
+        p = Path(str(c.get("path", "")))
+        rec_size = int(c.get("size", -1))
+        rec_mtime = float(c.get("mtime", -1.0))
+        ts = utc_now_iso()
+
+        if not p.exists():
+            results.append(ApplyResult(str(p), "skip", "preflight_failed", "missing", ts))
+            continue
+
+        st = p.stat()
+        if st.st_size != rec_size or float(st.st_mtime) != rec_mtime:
+            results.append(ApplyResult(str(p), "skip", "preflight_failed", "changed_since_scan", ts))
+            continue
+
+        if dry_run:
+            results.append(ApplyResult(str(p), "dry_run", "ok", "no filesystem changes", ts))
+            continue
+
+        try:
+            apply_fn(str(p))
+            results.append(ApplyResult(str(p), "apply", "ok", "deleted_or_moved", ts))
+        except Exception as e:
+            results.append(ApplyResult(str(p), "apply", "error", f"{type(e).__name__}: {e}", ts))
+
+    with events_path.open("a", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r.__dict__, sort_keys=True) + "\n")
+
+    return results
+
+
 # ----------------------------
 # Windows placeholder / offline detection (Cloud Files / Files-on-Demand)
 # ----------------------------
@@ -310,8 +481,43 @@ def write_json_atomic(path: Path, data: dict) -> None:
     Writes JSON atomically (temp file + replace) so we don't end up with a half-written meta file.
     """
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, indent=2))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
+
+
+def write_checksum_sidecar(path: Path) -> str:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(f"{digest}  {path.name}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, sidecar)
+    return digest
+
+
+RUN_STATES = {
+    "created",
+    "scanning",
+    "indexed",
+    "planned",
+    "applying",
+    "completed",
+    "failed",
+    "cancelled",
+}
+
+
+def new_run_id() -> str:
+    return uuid4().hex
+
+
+def write_run_summary(report_dir: Path, summary: dict) -> None:
+    write_json_atomic(report_dir / "run_summary.json", summary)
 
 
 def _db_create_schema(con: sqlite3.Connection) -> None:
@@ -320,17 +526,34 @@ def _db_create_schema(con: sqlite3.Connection) -> None:
     con.execute(
         """
         CREATE TABLE files (
-            path    TEXT PRIMARY KEY,
-            name    TEXT NOT NULL,
-            size    INTEGER NOT NULL,
-            mtime   REAL NOT NULL,
-            root_id INTEGER NOT NULL
+            path      TEXT PRIMARY KEY,
+            name      TEXT NOT NULL,
+            size      INTEGER NOT NULL,
+            mtime     REAL NOT NULL,
+            root_id   INTEGER NOT NULL,
+            inode     INTEGER,
+            device_id INTEGER,
+            ctime     REAL,
+            nlink     INTEGER,
+            ext_hint  TEXT,
+            mime_hint TEXT
         );
         """
     )
     con.execute("CREATE INDEX idx_files_size ON files(size);")
     con.execute("CREATE INDEX idx_files_name ON files(name);")
     con.execute("CREATE INDEX idx_files_root ON files(root_id);")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_state (
+            run_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            reason TEXT,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    con.execute("CREATE INDEX idx_files_dev_inode ON files(device_id, inode);")
 
 
 def _scan_root_append_to_con(
@@ -344,6 +567,10 @@ def _scan_root_append_to_con(
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
+    rule_trace: Optional[list[str]] = None,
+    error_budget: int = SCAN_ERROR_BUDGET_DEFAULT,
+    max_depth: int = SCAN_TREE_DEPTH_CAP_DEFAULT,
+    profile: bool = SCAN_PROFILE_DEFAULT,
 ) -> dict:
     """
     Walk root and insert file rows into SQLite.
@@ -375,8 +602,12 @@ def _scan_root_append_to_con(
     indexed = 0
     skipped = 0
     errors = 0
+    dirs_visited = 0
+    bytes_observed = 0
+    depth_skipped = 0
+    err_budget_exhausted = False
 
-    batch: list[tuple[str, str, int, float, int]] = []
+    batch: list[tuple[str, str, int, float, int, Optional[int], Optional[int], Optional[float], Optional[int], str, str]] = []
     last_emit = 0.0
     t0 = time.time()
 
@@ -393,6 +624,9 @@ def _scan_root_append_to_con(
                     "indexed": indexed,
                     "skipped": skipped,
                     "errors": errors,
+                    "dirs_visited": dirs_visited,
+                    "bytes_observed": bytes_observed,
+                    "depth_skipped": depth_skipped,
                     "rate_files_per_s": rate,
                     "elapsed_s": elapsed,
                     "eta_s": None,
@@ -405,14 +639,17 @@ def _scan_root_append_to_con(
             )
             last_emit = now
 
-    stack: list[Path] = [root]
+    stack: deque[tuple[Path, int]] = deque([(root, 0)])
+    root_resolved = root.resolve()
     emit(force=True)
 
     while stack and not cancel_flag():
-        d = stack.pop()
+        d, depth = stack.pop()
 
         # Skip excluded directory prefix
         if is_under_any_prefix(d, exclude_prefixes):
+            if rule_trace is not None:
+                rule_trace.append(f"{d}\texcluded by prefix")
             continue
 
         # Skip reparse points if not following symlinks/junctions
@@ -420,6 +657,7 @@ def _scan_root_append_to_con(
             continue
 
         try:
+            dirs_visited += 1
             with os.scandir(d) as it:
                 for entry in it:
                     if cancel_flag():
@@ -427,13 +665,22 @@ def _scan_root_append_to_con(
 
                     name = entry.name
                     p = Path(entry.path)
+                    try:
+                        if p.resolve() != root_resolved and root_resolved not in p.resolve().parents:
+                            continue
+                    except Exception:
+                        continue
 
                     # Skip by name
                     if name.lower() in exclude_names:
+                        if rule_trace is not None:
+                            rule_trace.append(f"{p}\texcluded by name:{name.lower()}")
                         continue
 
                     # Skip by full path prefix
                     if is_under_any_prefix(p, exclude_prefixes):
+                        if rule_trace is not None:
+                            rule_trace.append(f"{p}\texcluded by prefix")
                         continue
 
                     try:
@@ -441,7 +688,10 @@ def _scan_root_append_to_con(
                             # Avoid following reparse points unless explicitly allowed
                             if not follow_symlinks and is_reparse_point(p):
                                 continue
-                            stack.append(p)
+                            if depth + 1 > max_depth:
+                                depth_skipped += 1
+                                continue
+                            stack.append((p, depth + 1))
                             continue
 
                         if entry.is_file(follow_symlinks=follow_symlinks):
@@ -449,9 +699,11 @@ def _scan_root_append_to_con(
                             try:
                                 st = entry.stat(follow_symlinks=follow_symlinks)
                                 size = int(st.st_size)
+                                bytes_observed += size
                                 if size < min_size:
                                     skipped += 1
                                 else:
+                                    suffix = Path(name).suffix.lower()
                                     batch.append(
                                         (
                                             entry.path,
@@ -459,16 +711,25 @@ def _scan_root_append_to_con(
                                             size,
                                             float(st.st_mtime),
                                             int(root_id),
+                                            int(st.st_ino) if hasattr(st, "st_ino") else None,
+                                            int(st.st_dev) if hasattr(st, "st_dev") else None,
+                                            float(st.st_ctime) if hasattr(st, "st_ctime") else None,
+                                            int(st.st_nlink) if hasattr(st, "st_nlink") else None,
+                                            suffix,
+                                            "",
                                         )
                                     )
                                     indexed += 1
                             except (PermissionError, FileNotFoundError, OSError) as e:
                                 errors += 1
                                 log_err("FILE_STAT", entry.path, e)
+                                if errors >= error_budget:
+                                    err_budget_exhausted = True
+                                    break
 
                             if len(batch) >= 5000:
                                 con.executemany(
-                                    "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id) VALUES (?,?,?,?,?)",
+                                    "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id,inode,device_id,ctime,nlink,ext_hint,mime_hint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                                     batch,
                                 )
                                 con.commit()
@@ -479,16 +740,24 @@ def _scan_root_append_to_con(
                     except (PermissionError, FileNotFoundError, OSError) as e:
                         errors += 1
                         log_err("ENTRY", entry.path, e)
+                        if errors >= error_budget:
+                            err_budget_exhausted = True
+                            break
                         continue
+                if err_budget_exhausted:
+                    break
 
         except (PermissionError, FileNotFoundError, OSError) as e:
             errors += 1
             log_err("DIR", str(d), e)
+            if errors >= error_budget:
+                err_budget_exhausted = True
+                break
             continue
 
     if batch:
         con.executemany(
-            "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id) VALUES (?,?,?,?,?)",
+            "INSERT OR REPLACE INTO files(path,name,size,mtime,root_id,inode,device_id,ctime,nlink,ext_hint,mime_hint) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             batch,
         )
         con.commit()
@@ -502,7 +771,23 @@ def _scan_root_append_to_con(
     except Exception:
         pass
 
-    return {"listed": listed, "indexed": indexed, "skipped": skipped, "errors": errors}
+    elapsed_s = time.time() - t0
+    if profile:
+        print(
+            f"[scan-profile] root={root} listed={listed} dirs={dirs_visited} bytes={bytes_observed} elapsed_s={elapsed_s:.3f} errors={errors}"
+        )
+
+    return {
+        "listed": listed,
+        "indexed": indexed,
+        "skipped": skipped,
+        "errors": errors,
+        "dirs_visited": dirs_visited,
+        "bytes_observed": bytes_observed,
+        "elapsed_s": elapsed_s,
+        "depth_skipped": depth_skipped,
+        "error_budget_exhausted": err_budget_exhausted,
+    }
 
 
 def scan_roots_to_db(
@@ -514,6 +799,7 @@ def scan_roots_to_db(
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> dict:
     """
     Scan multiple roots into one DB. root_id is assigned by index in `roots`.
@@ -521,7 +807,16 @@ def scan_roots_to_db(
     """
     exclude_names, exclude_prefixes = compile_excludes(excludes)
 
-    if db_path.exists():
+    resume_root_id = -1
+    if checkpoint_path and checkpoint_path.exists():
+        try:
+            ck = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            resume_root_id = int(ck.get("last_scanned_root_id", -1))
+        except Exception:
+            resume_root_id = -1
+
+    recreate = (not db_path.exists()) or resume_root_id < 0
+    if recreate and db_path.exists():
         db_path.unlink()
 
     con = sqlite3.connect(str(db_path))
@@ -529,9 +824,21 @@ def scan_roots_to_db(
         _db_create_schema(con)
 
         per_root: list[dict] = []
-        combined = {"listed": 0, "indexed": 0, "skipped": 0, "errors": 0}
+        combined = {
+            "listed": 0,
+            "indexed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "dirs_visited": 0,
+            "bytes_observed": 0,
+            "elapsed_s": 0.0,
+            "depth_skipped": 0,
+            "error_budget_exhausted": 0,
+        }
 
         for rid, r in enumerate(roots):
+            if resume_root_id >= 0 and rid <= resume_root_id:
+                continue
             if cancel_flag():
                 break
 
@@ -548,6 +855,14 @@ def scan_roots_to_db(
                 scan_error_log_path=scan_error_log_path,
             )
             per_root.append({"root_id": rid, "root": str(r), **st})
+            if checkpoint_path:
+                try:
+                    write_json_atomic(
+                        checkpoint_path,
+                        {"last_scanned_root_id": rid, "root": str(r), "stats": st},
+                    )
+                except Exception:
+                    pass
             for k in combined.keys():
                 combined[k] += int(st.get(k, 0))
 
@@ -566,6 +881,7 @@ def scan_root_to_db(
     cancel_flag: Callable[[], bool],
     metrics_cb: Callable[[dict], None],
     scan_error_log_path: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> dict:
     """
     Backward compatible single-root scan. Uses the new schema (includes root_id).
@@ -579,6 +895,7 @@ def scan_root_to_db(
         cancel_flag=cancel_flag,
         metrics_cb=metrics_cb,
         scan_error_log_path=scan_error_log_path,
+        checkpoint_path=checkpoint_path,
     )
     return r.get("combined") or {"listed": 0, "indexed": 0, "skipped": 0, "errors": 0}
 
@@ -589,6 +906,7 @@ def find_dupes_from_db(
     metrics_cb: Callable[[dict], None],
     error_log_path: Optional[Path] = None,
     required_roots: Optional[tuple[int, int]] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> list[DupeGroup]:
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
@@ -679,7 +997,35 @@ def find_dupes_from_db(
 
         emit(force=True)
 
+        last_done_size = None
+        resumed_dupes: list[DupeGroup] = []
+        if checkpoint_path and checkpoint_path.exists():
+            try:
+                ck = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                last_done_size = ck.get("last_done_size")
+                for g in ck.get("dupes_so_far", []):
+                    resumed_dupes.append(
+                        DupeGroup(
+                            sha256=str(g["sha256"]),
+                            size=int(g["size"]),
+                            files=[FileRec(**f) for f in g.get("files", [])],
+                        )
+                    )
+            except Exception:
+                last_done_size = None
+                resumed_dupes = []
+        if resumed_dupes:
+            dupes.extend(resumed_dupes)
+
+        # Only skip completed size groups if we also restored duplicate groups.
+        # A checkpoint that only contains "last_done_size" would otherwise drop
+        # previously found duplicates from skipped groups in this invocation.
+        can_skip_completed = last_done_size is not None and bool(resumed_dupes)
+
         for i, size in enumerate(sizes, start=1):
+            if can_skip_completed and int(size) <= int(last_done_size):
+                done_groups = i
+                continue
             if cancel_flag():
                 break
 
@@ -689,7 +1035,7 @@ def find_dupes_from_db(
 
             rows = con.execute(
                 """
-                SELECT path, name, size, mtime, root_id
+                SELECT path, name, size, mtime, root_id, inode, device_id, ctime, nlink, ext_hint, mime_hint
                 FROM files
                 WHERE size= ?
                 """,
@@ -705,6 +1051,12 @@ def find_dupes_from_db(
                     size=int(r["size"]),
                     mtime=float(r["mtime"]),
                     root_id=int(r["root_id"]),
+                    inode=int(r["inode"]) if r["inode"] is not None else None,
+                    device_id=int(r["device_id"]) if r["device_id"] is not None else None,
+                    ctime=float(r["ctime"]) if r["ctime"] is not None else None,
+                    nlink=int(r["nlink"]) if r["nlink"] is not None else None,
+                    ext_hint=(r["ext_hint"] or ""),
+                    mime_hint=(r["mime_hint"] or ""),
                 )
                 for r in rows
             ]
@@ -747,16 +1099,40 @@ def find_dupes_from_db(
                 break
 
             for digest, items in by_hash.items():
-                if len(items) > 1:
+                unique_items: list[FileRec] = []
+                for cand in items:
+                    if any(_same_file_identity(cand, ex) for ex in unique_items):
+                        continue
+                    unique_items.append(cand)
+                if len(unique_items) > 1:
                     dupes.append(
                         DupeGroup(
                             sha256=digest,
                             size=size,
-                            files=sorted(items, key=lambda x: x.path.lower()),
+                            files=sorted(unique_items, key=lambda x: x.path.lower()),
                         )
                     )
 
             done_groups = i
+            if checkpoint_path:
+                try:
+                    write_json_atomic(
+                        checkpoint_path,
+                        {
+                            "last_done_size": int(size),
+                            "done_groups": int(done_groups),
+                            "dupes_so_far": [
+                                {
+                                    "sha256": d.sha256,
+                                    "size": d.size,
+                                    "files": [f.__dict__ for f in d.files],
+                                }
+                                for d in dupes
+                            ],
+                        },
+                    )
+                except Exception:
+                    pass
             emit()
 
         emit(force=True)
@@ -779,11 +1155,67 @@ def find_dupes_from_db(
         con.close()
 
 
+def _same_file_identity(a: FileRec, b: FileRec) -> bool:
+    return (
+        a.device_id is not None
+        and a.inode is not None
+        and a.device_id == b.device_id
+        and a.inode == b.inode
+    )
+
+
+def classify_confidence_tier(group: DupeGroup) -> str:
+    return "Tier 1: size+hash exact duplicates"
+
+
+def score_retention_candidate(rec: FileRec, keep_roots: list[str], root_priority: dict[str, int], mode: str = "newest") -> tuple[float, list[str]]:
+    reasons: list[str] = []
+    score = 0.0
+    rec_path_norm = os.path.normcase(os.path.normpath(rec.path))
+    for kr in keep_roots:
+        nkr = os.path.normcase(os.path.normpath(kr))
+        if rec_path_norm == nkr or rec_path_norm.startswith(nkr + os.sep):
+            score += 1_000_000
+            reasons.append(f"protected_keep_root:{kr}")
+            break
+    if mode == "newest":
+        score += rec.mtime
+        reasons.append("newest")
+    elif mode == "oldest":
+        score -= rec.mtime
+        reasons.append("oldest")
+    elif mode == "largest":
+        score += rec.size
+        reasons.append("largest")
+    depth = len(Path(rec.path).parts)
+    score += depth * 0.01
+    reasons.append(f"path_depth={depth}")
+    for root, prio in root_priority.items():
+        nr = os.path.normcase(os.path.normpath(root))
+        if rec_path_norm == nr or rec_path_norm.startswith(nr + os.sep):
+            score += prio * 1000.0
+            reasons.append(f"root_priority:{root}={prio}")
+            break
+    return score, reasons
+
+
 def build_reports(dupes: list[DupeGroup]) -> tuple[list[dict], dict[str, list[dict]]]:
     by_hash: list[dict] = []
     by_name: dict[str, list[dict]] = defaultdict(list)
 
     for g in dupes:
+        scored = [
+            (
+                f,
+                *score_retention_candidate(
+                    f, keep_roots=[], root_priority={}, mode="newest"
+                ),
+            )
+            for f in g.files
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        keep_path = scored[0][0].path if scored else None
+        reason_by_path = {it[0].path: it[2] for it in scored}
         files = [
             {
                 "path": f.path,
@@ -791,11 +1223,20 @@ def build_reports(dupes: list[DupeGroup]) -> tuple[list[dict], dict[str, list[di
                 "size": f.size,
                 "mtime": f.mtime,
                 "root_id": int(getattr(f, "root_id", 0)),
+                "inode": getattr(f, "inode", None),
+                "device_id": getattr(f, "device_id", None),
+                "ctime": getattr(f, "ctime", None),
+                "nlink": getattr(f, "nlink", None),
+                "ext_hint": getattr(f, "ext_hint", ""),
+                "mime_hint": getattr(f, "mime_hint", ""),
+                "decision": "keep" if f.path == keep_path else "delete_candidate",
+                "decision_reasons": reason_by_path.get(f.path, []),
             }
             for f in g.files
         ]
 
         group = {
+            "confidence_tier": classify_confidence_tier(g),
             "sha256": g.sha256,
             "size": g.size,
             "count": len(g.files),
@@ -891,6 +1332,34 @@ def append_jsonl_line(path: Path, obj: dict) -> None:
 
 def append_prune_event(report_dir: Path, event: dict) -> None:
     append_jsonl_line(report_dir / "prune_events.jsonl", event)
+
+
+def detect_elevated_privileges() -> bool:
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    return bool(getattr(os, "geteuid", lambda: 1)() == 0)
+
+
+def make_audit_event(
+    session_id: str,
+    action_type: str,
+    source_path: str,
+    outcome: str,
+    error: str = "",
+) -> dict:
+    return {
+        "event_id": str(uuid.uuid4()),
+        "actor": getpass.getuser(),
+        "session": session_id,
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "source_path": source_path,
+        "action_type": action_type,
+        "outcome": outcome,
+        "error": error,
+    }
 
 
 def write_scan_reports(

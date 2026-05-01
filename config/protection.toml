@@ -1,0 +1,19 @@
+enforce_safe_delete_roots = true
+
+protected_prefixes = [
+  "C:\\Windows",
+  "C:\\Program Files",
+  "C:\\Program Files (x86)",
+  "C:\\ProgramData",
+]
+
+protected_dir_names = [
+  "$Recycle.Bin",
+  "System Volume Information",
+  "Windows",
+]
+
+safe_delete_roots = [
+  "C:\\Users",
+  "D:\\Temp",
+]

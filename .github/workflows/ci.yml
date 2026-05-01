@@ -1,0 +1,94 @@
+name: CI Gates A-E
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  gate_a_core_scan_and_rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U pip pytest
+      - name: Gate A pass/fail criteria
+        run: |
+          pytest -q \
+            tests/test_collector_plugins.py \
+            tests/test_path_rules.py \
+            tests/test_scan_progress_and_budget.py \
+            tests/test_space_audit_metrics.py
+
+  gate_b_prune_plan_and_apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U pip pytest
+      - name: Gate B pass/fail criteria
+        run: |
+          pytest -q \
+            tests/test_prune_plan_integrity.py \
+            tests/test_prune_flows_integration.py \
+            tests/test_space_audit_integration_and_safety.py
+
+  gate_c_policy_firewall_and_prompt_security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U pip pytest
+      - name: Gate C pass/fail criteria
+        run: |
+          pytest -q \
+            tests/test_policy_firewall.py \
+            tests/test_prompt_security.py \
+            tests/test_protection_policy_engine.py
+
+  gate_d_explainability_and_ranking_repro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U pip pytest
+      - name: Gate D pass/fail criteria
+        run: |
+          pytest -q \
+            tests/test_recommendation_engine.py \
+            tests/test_ai_evidence_builder.py \
+            tests/test_golden_recommendations.py
+
+  gate_e_privacy_and_export_hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U pip pytest
+      - name: Gate E pass/fail criteria
+        run: |
+          pytest -q \
+            tests/test_cli_e2e_smoke.py \
+            tests/test_golden_plan_output.py \
+            tests/test_privacy_lint.py
+
+  release_blocker:
+    name: Release blocker (policy/explainability/non-destructive invariants)
+    runs-on: ubuntu-latest
+    needs:
+      - gate_c_policy_firewall_and_prompt_security
+      - gate_d_explainability_and_ranking_repro
+      - gate_e_privacy_and_export_hygiene
+    steps:
+      - run: |
+          echo "Release is blocked unless Gates C/D/E are green."

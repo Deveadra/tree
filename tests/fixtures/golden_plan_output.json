@@ -1,0 +1,7 @@
+{
+  "schema": "plan-prune",
+  "groups": 1,
+  "files_to_prune": 1,
+  "bytes_reclaimable": 4,
+  "blocked_violations": 0
+}
