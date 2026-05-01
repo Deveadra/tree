@@ -76,6 +76,17 @@ Required entries in the signed checklist:
 - Recorded flaky-rate calculation and threshold compliance.
 - Two signers (Release Manager + QA/Owner) with date.
 
+## Final release decision
+- [ ] Confirm the `release_blocker` workflow job succeeded (depends on Gates B/C/D/E/F).
+- [ ] Archive CI run URL and test summary with release notes.
+
+## Gate G — Supply chain integrity and reproducible release artifacts
+- [ ] Built Linux/macOS/Windows artifacts using deterministic build script.
+- [ ] Generated `checksums.sha256.json` and verified with `scripts/release/verify_checksums.py`.
+- [ ] Generated SBOM artifacts (`*.spdx.json`) and provenance (`provenance.intoto.jsonl`).
+- [ ] Signed artifacts (`*.sig`) and published verification instructions.
+- [ ] Documented secure upgrade and rollback runbook.
+- **Release blocker:** any Gate G failure blocks release.
 ## Final external release decision
 - [ ] Confirm all required CI gates are green.
 - [ ] Confirm no required gate was skipped.

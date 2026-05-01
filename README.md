@@ -313,3 +313,11 @@ Envelope expectations (guidance):
 - 1M-file synthetic dataset should complete in single-digit to low double-digit minutes.
 - 5M deep mixed-permission dataset should complete within ~1 hour on CI standard profile.
 - 10M placeholder-heavy dataset should complete within ~2 hours on scale certification profile.
+## Release security and reproducibility
+
+Release hardening assets live under `scripts/release/` and `docs/security/release_signing_and_verification.md`:
+- deterministic multi-platform artifact builders,
+- checksum generation and CI verification,
+- SBOM + provenance generation,
+- artifact signing and user verification steps,
+- secure upgrade and rollback procedures.
