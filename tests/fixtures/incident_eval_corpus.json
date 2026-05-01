@@ -1,0 +1,17 @@
+[
+  {
+    "id": "inc-1",
+    "expected": {"root_cause_id": "io-spike", "risk_tier": "Caution"},
+    "predicted": {"root_cause_id": "io-spike", "risk_tier": "Caution", "useful": true, "confidence": 0.9}
+  },
+  {
+    "id": "inc-2",
+    "expected": {"root_cause_id": "cache-bloat", "risk_tier": "Safe"},
+    "predicted": {"root_cause_id": "cache-bloat", "risk_tier": "Dangerous", "useful": true, "confidence": 0.8}
+  },
+  {
+    "id": "inc-3",
+    "expected": {"root_cause_id": "logs-growth", "risk_tier": "Dangerous"},
+    "predicted": {"root_cause_id": "tmp-growth", "risk_tier": "Dangerous", "useful": false, "confidence": 0.2}
+  }
+]
