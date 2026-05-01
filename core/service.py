@@ -523,11 +523,13 @@ def find_duplicates(
     error_log_path: Optional[Path] = None,
     required_roots: Optional[tuple[int, int]] = None,
 ) -> list[DuplicateResultGroup]:
+    # compare_mode is kept for backward-compatible facade calls, but
+    # duplicate filtering is handled via required_roots.
+    _ = compare_mode
     return hash_find_duplicates(
         db_path=db_path,
         cancel_flag=cancel_flag,
         metrics_cb=metrics_cb,
-        compare_mode=compare_mode,
         error_log_path=error_log_path,
         required_roots=required_roots,
     )
