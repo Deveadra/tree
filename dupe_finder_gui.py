@@ -754,6 +754,8 @@ class UITheme:
     CONTROL_HEIGHT = 34
     TOUCH_TARGET = 40
     ICON_SIZE = 18
+    FIELD_VERTICAL_PADDING = 7
+    FIELD_HORIZONTAL_PADDING = 10
 
 
 # ----------------------------
@@ -908,15 +910,13 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.status_lbl = QLabel("Ready.")
         self.scan_state_lbl = QLabel("Scan state: idle")
-        self.scan_state_lbl.setStyleSheet("QLabel { font-weight: 700; color: #1f2937; }")
+        self.scan_state_lbl.setProperty("statusRole", "neutral")
         self.remaining_lbl = QLabel("")
         self.remaining_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.remaining_lbl.setStyleSheet("QLabel { font-weight: 600; }")
+        self.remaining_lbl.setProperty("typographyRole", "caption")
         self.rclone_stats = QLabel("")
         self.rclone_stats.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.rclone_stats.setStyleSheet(
-            "QLabel { font-family: Consolas, 'Courier New', monospace; }"
-        )
+        self.rclone_stats.setProperty("typographyRole", "caption")
 
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
@@ -925,14 +925,13 @@ class MainWindow(QMainWindow):
         self.last_run_summary.setPlaceholderText("Last run summary persists here.")
 
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("QTabWidget::pane { padding: 12px; }")
         self.monitor_tab = QWidget()
         self.monitor_is_read_only_lbl = QLabel("Read-only monitor (no filesystem writes or delete actions).")
-        self.monitor_is_read_only_lbl.setStyleSheet("QLabel { color: #8b0000; font-weight: 700; }")
+        self.monitor_is_read_only_lbl.setProperty("statusRole", "danger")
         self.monitor_free_used_lbl = QLabel("Free/Used: n/a")
         self.monitor_delta_lbl = QLabel("Recent delta: n/a")
         self.monitor_alert_lbl = QLabel("Alert state: Normal")
-        self.monitor_alert_lbl.setStyleSheet("QLabel { color: #1f7a1f; font-weight: 700; }")
+        self.monitor_alert_lbl.setProperty("statusRole", "success")
         self.monitor_spark_chart = QChart()
         self.monitor_spark_chart.legend().hide()
         self.monitor_spark_chart.setBackgroundVisible(False)
@@ -972,9 +971,7 @@ class MainWindow(QMainWindow):
         self.protected_warning_lbl.setWordWrap(True)
         self.protected_warning_lbl.setAccessibleName("Protected warning banner")
         self.protected_warning_lbl.setAccessibleDescription("Warning banner for protected/system-managed zone blocks.")
-        self.protected_warning_lbl.setStyleSheet(
-            "QLabel { background: #fff3cd; color: #7a4f01; border: 1px solid #f0ad4e; padding: 6px; font-weight: 600; }"
-        )
+        self.protected_warning_lbl.setProperty("statusRole", "warning_banner")
         self.protected_warning_lbl.hide()
         self.plan_state_combo = QComboBox()
         self.plan_state_combo.addItems(["draft", "reviewed", "approved", "executed"])
@@ -1059,10 +1056,6 @@ class MainWindow(QMainWindow):
         )
         self.files_table.setSortingEnabled(True)
         self.files_table.setAlternatingRowColors(True)
-        self.files_table.setStyleSheet(
-            "QHeaderView::section { background-color: #1f2937; color: white; font-weight: 700; padding: 6px; }"
-            "QTableWidget { gridline-color: #d1d5db; alternate-background-color: #f8fafc; }"
-        )
         self.files_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self._show_files_table_context_menu)
         self.files_table.cellDoubleClicked.connect(self.on_file_cell_double_clicked)
@@ -1126,14 +1119,7 @@ class MainWindow(QMainWindow):
         main.setSpacing(LayoutMetrics.SPACING_MD)
         main.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
 
-        section_header_style = (
-            f"QLabel {{ font-size: {UITheme.TYPOGRAPHY['section_header']['size']}px; "
-            f"font-weight: {UITheme.TYPOGRAPHY['section_header']['weight']}; "
-            f"color: {UITheme.PALETTE['text']}; }}"
-        )
-
         scan_setup_header = QLabel("Scan Setup")
-        scan_setup_header.setStyleSheet(section_header_style)
         scan_setup_header.setProperty("typographyRole", "section_header")
         main.addWidget(scan_setup_header)
 
@@ -1239,7 +1225,6 @@ class MainWindow(QMainWindow):
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(LayoutMetrics.SPACING_SM)
         self.app_brand_lbl = ElidedLabel("Dupe Finder Pro — Safe Duplicate Discovery & Cleanup")
-        self.app_brand_lbl.setStyleSheet(section_header_style)
         self.app_brand_lbl.setProperty("typographyRole", "title")
         self.app_brand_lbl.setMinimumWidth(0)
         self.app_brand_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -1300,7 +1285,6 @@ class MainWindow(QMainWindow):
         left_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
         left_l.setSpacing(LayoutMetrics.SPACING_SM)
         results_header = QLabel("Results")
-        results_header.setStyleSheet(section_header_style)
         results_header.setProperty("typographyRole", "section_header")
         left_l.addWidget(results_header)
         filters_row = QHBoxLayout()
@@ -1314,7 +1298,7 @@ class MainWindow(QMainWindow):
         filters_row.addStretch(1)
         left_l.addLayout(filters_row)
         self.results_empty_lbl = QLabel("Run a scan to see duplicate groups.")
-        self.results_empty_lbl.setStyleSheet("QLabel { color: #94a3b8; font-style: italic; }")
+        self.results_empty_lbl.setProperty("typographyRole", "caption")
         left_l.addWidget(self.results_empty_lbl)
         left_l.addWidget(self.tabs, 1)
         self.tabs.setMinimumHeight(320)
@@ -1325,21 +1309,20 @@ class MainWindow(QMainWindow):
         right_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
         right_l.setSpacing(LayoutMetrics.SPACING_SM)
         actions_header_right = QLabel("Recommended Actions")
-        actions_header_right.setStyleSheet(section_header_style)
         actions_header_right.setProperty("typographyRole", "section_header")
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table, 1)
         self.files_table.setMinimumHeight(280)
         self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
-        self.row_hint_lbl.setStyleSheet("QLabel { color: #cbd5e1; }")
+        self.row_hint_lbl.setProperty("typographyRole", "caption")
         self.row_hint_lbl.setProperty("typographyRole", "caption")
         right_l.addWidget(self.row_hint_lbl)
         self.detail_size_card = QLabel("Size: —")
         self.detail_mtime_card = QLabel("Modified: —")
         self.detail_path_card = QLabel("Path health/protection: —")
         for _card in (self.detail_size_card, self.detail_mtime_card, self.detail_path_card):
-            _card.setStyleSheet("QLabel { border: 1px solid #d1d5db; border-radius: 6px; padding: 6px; background: #f9fafb; }")
+            _card.setProperty("labelRole", "detail_card")
             right_l.addWidget(_card)
 
         pref_row = QHBoxLayout()
@@ -1435,10 +1418,6 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.auto_prune_btn.text(), self.auto_prune_by_preferred_path)
         tools_menu.addAction(self.compare_prune_btn.text(), self.compare_prune_delete_a_using_b)
         tools_menu_btn.setMenu(tools_menu)
-
-        neutral_btn_style = "QPushButton { font-weight: 500; }"
-        for _btn in (self.space_audit_btn, self.cancel_btn, self.load_btn, self.open_reports_btn):
-            _btn.setStyleSheet(neutral_btn_style)
 
         self.prefer_path_btn.clicked.connect(self.pick_prefer_path)
         self.auto_prune_btn.clicked.connect(self.auto_prune_by_preferred_path)
@@ -1554,7 +1533,7 @@ class MainWindow(QMainWindow):
     def _set_badge(self, lbl: QLabel, text: str) -> None:
         if text:
             lbl.setText(f"⚠ {text}")
-            lbl.setStyleSheet("QLabel { color: #b45309; font-weight: 600; }")
+            lbl.setProperty("statusRole", "warning")
         else:
             lbl.setText("")
 
@@ -1820,7 +1799,7 @@ class MainWindow(QMainWindow):
         threshold_b = int(self.monitor_trigger_spin.value()) * 1024 * 1024
         if abs(delta_b) >= threshold_b:
             self.monitor_alert_lbl.setText("Alert state: Spike detected")
-            self.monitor_alert_lbl.setStyleSheet("QLabel { color: #b22222; font-weight: 700; }")
+            self.monitor_alert_lbl.setProperty("statusRole", "danger")
             suspects = ", ".join(str(row.get("path", "")) for row in top_offenders[:3]) or "n/a"
             event = {
                 "event_id": f"spike-{int(time.time() * 1000)}",
@@ -1857,7 +1836,7 @@ class MainWindow(QMainWindow):
                 self.monitor_spikes_table.setItem(row_idx, 4, QTableWidgetItem(str(row["evidence_bundle"])))
         else:
             self.monitor_alert_lbl.setText("Alert state: Normal")
-            self.monitor_alert_lbl.setStyleSheet("QLabel { color: #1f7a1f; font-weight: 700; }")
+            self.monitor_alert_lbl.setProperty("statusRole", "success")
 
     # ----------------------------
     # UI helpers
@@ -1909,7 +1888,10 @@ class MainWindow(QMainWindow):
             "idle": "#1f2937",
         }.get(state, "#1f2937")
         self.scan_state_lbl.setText(f"Scan state: {state}")
-        self.scan_state_lbl.setStyleSheet(f"QLabel {{ font-weight: 700; color: {color}; }}")
+        role = "neutral" if state in {"idle", "running"} else ("warning" if state == "paused" else ("success" if state == "completed" else "danger"))
+        self.scan_state_lbl.setProperty("statusRole", role)
+        self.scan_state_lbl.style().unpolish(self.scan_state_lbl)
+        self.scan_state_lbl.style().polish(self.scan_state_lbl)
 
     def _persist_last_run_summary(self, text: str) -> None:
         QSettings("DupeFinder", "DupeFinderGUI").setValue("last_run_summary", text)
@@ -2058,11 +2040,10 @@ class MainWindow(QMainWindow):
                 background: {palette['surface']};
                 color: {palette['text']};
                 font-size: {UITheme.TYPOGRAPHY['body']['size']}px;
-                line-height: {UITheme.TYPOGRAPHY['body']['line_height']};
             }}
             QLabel {{
-                padding-top: 2px;
-                padding-bottom: 2px;
+                padding: 2px 0;
+                min-height: {UITheme.CONTROL_HEIGHT}px;
             }}
             QLabel[typographyRole="title"] {{
                 font-size: {UITheme.TYPOGRAPHY['title']['size']}px;
@@ -2077,35 +2058,58 @@ class MainWindow(QMainWindow):
                 font-weight: {UITheme.TYPOGRAPHY['caption']['weight']};
                 color: {palette['text_muted']};
             }}
+            QLabel[labelRole="detail_card"] {{
+                border: 1px solid {palette['border']};
+                border-radius: 6px;
+                padding: 8px;
+                background: {palette['surface_alt']};
+                color: {palette['text']};
+            }}
             QGroupBox, QTabWidget::pane, QTableWidget, QTextEdit, QListWidget, QTreeWidget, QLineEdit, QComboBox, QSpinBox {{
                 background: {palette['surface_alt']};
                 border: 1px solid {palette['border']};
                 border-radius: {UITheme.CORNER_RADIUS}px;
             }}
-            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox, QTextEdit {{
+            QTabWidget::pane {{ padding: 12px; }}
+            QHeaderView::section {{
+                background-color: #1f2937;
+                color: #f9fafb;
+                font-weight: 700;
+                padding: 6px;
+            }}
+            QTableWidget {{
+                gridline-color: #475569;
+                alternate-background-color: #1b2638;
+            }}
+            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox, QTextEdit, QPlainTextEdit {{
                 min-height: {UITheme.TOUCH_TARGET}px;
                 border-radius: {UITheme.CORNER_RADIUS}px;
-                padding: 8px 10px;
+                padding: {UITheme.FIELD_VERTICAL_PADDING}px {UITheme.FIELD_HORIZONTAL_PADDING}px;
             }}
-            QPushButton:hover, QToolButton:hover {{ background: #243447; }}
+            QTextEdit {{
+                padding-top: 8px;
+                padding-bottom: 8px;
+            }}
+            QPushButton:hover, QToolButton:hover, QLineEdit:hover, QComboBox:hover, QSpinBox:hover, QTextEdit:hover {{ background: #243447; }}
             QPushButton:pressed, QToolButton:pressed {{ background: #334155; }}
             QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus,
             QSpinBox:focus, QListWidget:focus, QTreeWidget:focus, QTableWidget:focus, QTextEdit:focus {{
-                border: 1px solid {palette['focus']};
-                outline: 2px solid {palette['focus']};
-                outline-offset: 1px;
+                border: 2px solid {palette['focus']};
+                background: #1e3148;
             }}
             QWidget:disabled {{
-                color: #94a3b8;
+                color: #aeb9c8;
             }}
             QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QTextEdit:disabled, QListWidget:disabled {{
-                background: #1b2638;
-                color: #9ca3af;
-                border: 1px solid #475569;
+                background: #233247;
+                color: #c7d2de;
+                border: 1px solid #5b6d84;
             }}
+            QLabel[statusRole="neutral"] {{ color: #bfdbfe; font-weight: 700; }}
             QLabel[statusRole="warning"] {{ color: {palette['warning']}; font-weight: 700; }}
             QLabel[statusRole="danger"] {{ color: {palette['danger']}; font-weight: 700; }}
             QLabel[statusRole="success"] {{ color: {palette['success']}; font-weight: 700; }}
+            QLabel[statusRole="warning_banner"] {{ background: #3b2a00; color: #fde68a; border: 1px solid #b45309; border-radius: 6px; padding: 8px; font-weight: 600; }}
             QPushButton[buttonRole="primary"] {{
                 background-color: #2563eb;
                 color: #ffffff;
