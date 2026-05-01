@@ -33,7 +33,7 @@ from PySide6.QtCore import (
     Slot,
     QSize,
 )
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtGui import QAction, QFont, QIcon, QFontMetrics
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -68,9 +69,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QToolButton,
-    QToolButton,
     QMenu,
     QStyle,
+    QGridLayout,
+    QBoxLayout,
+    QSizePolicy,
 )
 
 from core.service import (
@@ -739,9 +742,15 @@ class UITheme:
         "focus": "#7dd3fc",
         "border": "#334155",
     }
-    TYPE_SCALE = {"xs": 11, "sm": 12, "md": 13, "lg": 16}
+    TYPE_SCALE = {"xs": 11, "sm": 12, "md": 13, "lg": 16, "xl": 20}
+    TYPOGRAPHY = {
+        "title": {"size": TYPE_SCALE["xl"], "weight": 700, "line_height": 1.35},
+        "section_header": {"size": TYPE_SCALE["lg"], "weight": 700, "line_height": 1.35},
+        "body": {"size": TYPE_SCALE["md"], "weight": 400, "line_height": 1.45},
+        "caption": {"size": TYPE_SCALE["sm"], "weight": 500, "line_height": 1.35},
+    }
     CORNER_RADIUS = 8
-    CONTROL_HEIGHT = 36
+    CONTROL_HEIGHT = 34
     TOUCH_TARGET = 40
     ICON_SIZE = 18
 
@@ -750,12 +759,61 @@ class UITheme:
 # Main Window
 # ----------------------------
 
-SPACING_SM = 8
-SPACING_MD = 14
-SPACING_LG = 20
+class LayoutMetrics:
+    SPACING_SM = 8
+    SPACING_MD = 14
+    SPACING_LG = 20
+    FORM_ROW_SPACING = 8
+    FORM_LABEL_INPUT_SPACING = 14
+    CONTENT_MARGINS = 20
+
+
+
+
+class ElidedLabel(QLabel):
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full_text = text
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self._full_text = text
+        fm = QFontMetrics(self.font())
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, max(0, self.width() - 4))
+        super().setText(elided)
+        self.setToolTip(text if elided != text else "")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        self.setText(self._full_text)
+        super().resizeEvent(event)
+
+
+class ElidedLineEdit(QLineEdit):
+    def __init__(self, placeholder: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full_placeholder = placeholder
+        if placeholder:
+            self.setPlaceholderText(placeholder)
+
+    def setPlaceholderText(self, text: str) -> None:  # type: ignore[override]
+        self._full_placeholder = text
+        super().setPlaceholderText(self._elided_placeholder())
+        self.setToolTip(text if self.placeholderText() != text else "")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._full_placeholder:
+            super().setPlaceholderText(self._elided_placeholder())
+
+    def _elided_placeholder(self) -> str:
+        fm = QFontMetrics(self.font())
+        return fm.elidedText(self._full_placeholder, Qt.TextElideMode.ElideRight, max(0, self.width() - 20))
 
 
 class MainWindow(QMainWindow):
+    SCAN_SETUP_COMPACT_BREAKPOINT = 1100
     WARNING_TEXTS = {
         "risk_mode_blocked_title": "Risk mode transition blocked",
         "risk_mode_blocked_body": (
@@ -769,6 +827,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._init_ui_system()
         self.setWindowTitle("Dupe Finder (GUI) — Size + SHA-256")
+        self.setMinimumSize(1024, 760)
+        self._compact_mode_breakpoint = 1180
 
         self.icon_provider = QFileIconProvider()
         self.dupe_by_digest: dict[str, DupeGroup] = {}
@@ -789,25 +849,23 @@ class MainWindow(QMainWindow):
         self.load_btn = QPushButton("Load previous scan…")
         self.open_reports_btn = QPushButton("Open current report folder")
 
-        self.root_edit = QLineEdit()
+        self.root_edit = ElidedLineEdit()
         self.root_edit.setPlaceholderText(r"E:\  (or any folder path)")
         self.root_edit.setClearButtonEnabled(True)
         self.browse_root_btn = QPushButton("Browse…")
         self.compare_mode_chk = QCheckBox("Compare two locations (Root A vs Root B)")
-        self.root2_edit = QLineEdit()
+        self.root2_edit = ElidedLineEdit()
         self.root2_edit.setPlaceholderText(r"Second root (e.g. E:\Backup\ or D:\)")
         self.root2_edit.setClearButtonEnabled(True)
         self.browse_root2_btn = QPushButton("Browse…")
         self.root2_edit.setEnabled(False)
         self.browse_root2_btn.setEnabled(False)
 
-        self.report_edit = QLineEdit(str(self.reports_root))
+        self.report_edit = ElidedLineEdit()
+        self.report_edit.setText(str(self.reports_root))
         self.report_edit.setPlaceholderText(r"Example: E:\DupeReports")
         self.report_edit.setClearButtonEnabled(True)
         self.browse_report_btn = QPushButton("Browse…")
-        # self.browse_root_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
-        # self.browse_root2_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
-        # self.browse_report_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
         self.browse_root_btn.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
         )
@@ -830,7 +888,7 @@ class MainWindow(QMainWindow):
         # NOTE: this field supports BOTH:
         #   - dir names (e.g. ".git", "node_modules")
         #   - full path prefixes (e.g. "C:\Windows", "%LOCALAPPDATA%\Packages")
-        self.exclude_input = QLineEdit()
+        self.exclude_input = ElidedLineEdit()
         self.exclude_input.setPlaceholderText(r"Example: .git or C:\Windows")
         self.exclude_input.setClearButtonEnabled(True)
         self.exclude_add_btn = QPushButton("Add")
@@ -861,10 +919,8 @@ class MainWindow(QMainWindow):
 
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
-        self.status_box.setFixedHeight(110)
         self.last_run_summary = QTextEdit()
         self.last_run_summary.setReadOnly(True)
-        self.last_run_summary.setFixedHeight(90)
         self.last_run_summary.setPlaceholderText("Last run summary persists here.")
 
         self.tabs = QTabWidget()
@@ -883,7 +939,6 @@ class MainWindow(QMainWindow):
         self.monitor_spark_chart.addSeries(self.monitor_sparkline)
         self.monitor_spark_chart.createDefaultAxes()
         self.monitor_spark_view = QChartView(self.monitor_spark_chart)
-        self.monitor_spark_view.setMinimumHeight(120)
         self.monitor_spikes_table = QTableWidget(0, 5)
         self.monitor_spikes_table.setHorizontalHeaderLabels(
             ["Severity", "Time (UTC)", "Delta", "Top suspects", "Evidence bundle"]
@@ -912,7 +967,6 @@ class MainWindow(QMainWindow):
         self.findings_summary.setPlaceholderText(
             "Top findings, confidence, protected-zone warnings, and safe next steps will appear here."
         )
-        self.findings_summary.setFixedHeight(180)
         self.protected_warning_lbl = QLabel("")
         self.protected_warning_lbl.setWordWrap(True)
         self.protected_warning_lbl.setAccessibleName("Protected warning banner")
@@ -1022,7 +1076,7 @@ class MainWindow(QMainWindow):
                 "Permanent delete",
             ]
         )
-        self.prefer_path_edit = QLineEdit()
+        self.prefer_path_edit = ElidedLineEdit()
         self.prefer_path_edit.setPlaceholderText(
             r"Preferred keep paths (priority order). Separate with ';'  e.g. E:\MAIN\OneDrive\; E:\MAIN\RPics\; E:\MAIN\Projects\\"
         )
@@ -1041,10 +1095,10 @@ class MainWindow(QMainWindow):
 
         self.analyze_paths_btn = QPushButton("Analyze Storage Patterns")
 
-        self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
+        self.trash_folder_edit = ElidedLineEdit()
+        self.trash_folder_edit.setText(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
         self.trash_folder_edit.setClearButtonEnabled(True)
-        # self.trash_folder_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
         self.trash_folder_btn.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
         )
@@ -1056,62 +1110,112 @@ class MainWindow(QMainWindow):
 
         top = QWidget()
         self.setCentralWidget(top)
-        main = QVBoxLayout(top)
-        main.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
-        main.setSpacing(SPACING_MD)
+        root_layout = QVBoxLayout(top)
+        root_layout.setContentsMargins(0, 0, 0, 0)
 
-        section_header_style = f"QLabel {{ font-size: {UITheme.TYPE_SCALE['lg']}px; font-weight: 700; color: {UITheme.PALETTE['text']}; }}"
+        self.top_scroll = QScrollArea()
+        self.top_scroll.setWidgetResizable(True)
+        self.top_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.top_scroll_widget = QWidget()
+        self.top_scroll.setWidget(self.top_scroll_widget)
+        root_layout.addWidget(self.top_scroll)
+
+        main = QVBoxLayout(self.top_scroll_widget)
+        main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
+        main.setSpacing(LayoutMetrics.SPACING_MD)
+
+        section_header_style = (
+            f"QLabel {{ font-size: {UITheme.TYPOGRAPHY['section_header']['size']}px; "
+            f"font-weight: {UITheme.TYPOGRAPHY['section_header']['weight']}; "
+            f"color: {UITheme.PALETTE['text']}; }}"
+        )
 
         scan_setup_header = QLabel("Scan Setup")
         scan_setup_header.setStyleSheet(section_header_style)
+        scan_setup_header.setProperty("typographyRole", "section_header")
         main.addWidget(scan_setup_header)
 
-        scan_setup_card = QGroupBox()
+#         scan_setup_card = QGroupBox()
+        scan_setup_card = QGroupBox("Scan Setup")
         scan_setup_card_layout = QVBoxLayout(scan_setup_card)
-        scan_setup_card_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        scan_setup_card_layout.setSpacing(SPACING_MD)
+        scan_setup_card_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_MD)
 
+        self._scan_setup_mode = None
+        self.scan_setup_grid = QGridLayout()
+        self.scan_setup_grid.setContentsMargins(0, 0, 0, 0)
+        self.scan_setup_grid.setHorizontalSpacing(SPACING_MD)
+        self.scan_setup_grid.setVerticalSpacing(SPACING_SM)
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(SPACING_MD)
-        form.setVerticalSpacing(SPACING_SM)
+        form.setHorizontalSpacing(LayoutMetrics.FORM_LABEL_INPUT_SPACING)
+        form.setVerticalSpacing(LayoutMetrics.FORM_ROW_SPACING)
 
         basic_group = QGroupBox("Scan setup")
-        basic_form = QFormLayout()
+        self.basic_form = QFormLayout()
+        self.basic_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.basic_form.setContentsMargins(0, 0, 0, 0)
+        self.basic_form.setHorizontalSpacing(SPACING_MD)
+        self.basic_form.setVerticalSpacing(SPACING_SM)
         root_row = QHBoxLayout()
-        root_row.setSpacing(SPACING_SM)
+        root_row.setSpacing(LayoutMetrics.SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
+        root_row.setStretch(0, 1)
         self.root_badge = QLabel("")
-        basic_form.addRow("Root to scan:", root_row)
-        basic_form.addRow("", self.root_badge)
+        self.basic_form.addRow("Root to scan:", root_row)
+        self.basic_form.addRow("", self.root_badge)
 
-        basic_form.addRow("", self.compare_mode_chk)
-        basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
+        self.basic_form.addRow("", self.compare_mode_chk)
+        self.basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
 
         root2_row = QHBoxLayout()
-        root2_row.setSpacing(SPACING_SM)
+        root2_row.setSpacing(LayoutMetrics.SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
+        root2_row.setStretch(0, 1)
         self.root2_badge = QLabel("")
-        basic_form.addRow("Root B (compare):", root2_row)
-        basic_form.addRow("", self.root2_badge)
+        self.basic_form.addRow("Root B (compare):", root2_row)
+        self.basic_form.addRow("", self.root2_badge)
 
         rep_row = QHBoxLayout()
-        rep_row.setSpacing(SPACING_SM)
+        rep_row.setSpacing(LayoutMetrics.SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
+        rep_row.setStretch(0, 1)
         self.report_badge = QLabel("")
-        basic_form.addRow("Reports root:", rep_row)
-        basic_form.addRow("", self.report_badge)
+        self.basic_form.addRow("Reports root:", rep_row)
+        self.basic_form.addRow("", self.report_badge)
 
-        basic_form.addRow("Min file size:", self.min_size_spin)
-        basic_group.setLayout(basic_form)
-        form.addRow(basic_group)
+        self.basic_form.addRow("Min file size:", self.min_size_spin)
+        basic_group.setLayout(self.basic_form)
 
         adv_group = QGroupBox("Advanced")
         adv_group.setCheckable(True)
         adv_group.setChecked(False)
+        self.adv_form = QFormLayout()
+        self.adv_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.adv_form.setContentsMargins(0, 0, 0, 0)
+        self.adv_form.setHorizontalSpacing(SPACING_MD)
+        self.adv_form.setVerticalSpacing(SPACING_SM)
+        self.exclude_token_row = QHBoxLayout()
+        self.exclude_token_row.addWidget(self.exclude_input)
+        self.exclude_token_row.addWidget(self.exclude_add_btn)
+        self.exclude_token_row.setStretch(0, 1)
+        self.adv_form.addRow("Add exclude token:", self.exclude_token_row)
+        self.adv_form.addRow("Exclude tokens:", self.exclude_list)
+        self.adv_form.addRow("", self.exclude_remove_btn)
+        self.adv_form.addRow("", self.follow_symlinks_chk)
+        self.adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
+        adv_group.setLayout(self.adv_form)
+
+        self.basic_group = basic_group
+        self.adv_group = adv_group
+        self.scan_setup_grid.addWidget(self.basic_group, 0, 0)
+        self.scan_setup_grid.addWidget(self.adv_group, 0, 1)
+        self.scan_setup_grid.setColumnStretch(0, 1)
+        self.scan_setup_grid.setColumnStretch(1, 1)
+        scan_setup_card_layout.addLayout(self.scan_setup_grid)
         adv_form = QFormLayout()
         ex_row = QHBoxLayout()
         ex_row.addWidget(self.exclude_input)
@@ -1123,53 +1227,72 @@ class MainWindow(QMainWindow):
         adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
         adv_group.setLayout(adv_form)
         form.addRow(adv_group)
-        # form.addRow("Reports root:", rep_row)
-
-        # form.addRow("Min file size:", self.min_size_spin)
-        # form.addRow("Excludes (names or full paths):", self.exclude_edit)
-        # form.addRow("", self.follow_symlinks_chk)
         scan_setup_card_layout.addLayout(form)
-        main.addWidget(scan_setup_card)
+        main.addWidget(scan_setup_card, 1)
+#         main.addWidget(scan_setup_card)
+#         self._update_scan_setup_layout_mode()
 
-        actions_header = QLabel("Primary Actions")
-        actions_header.setStyleSheet(section_header_style)
-        main.addWidget(actions_header)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(SPACING_SM)
+        self.app_brand_lbl = ElidedLabel("Dupe Finder Pro — Safe Duplicate Discovery & Cleanup")
+        self.app_brand_lbl.setStyleSheet(section_header_style)
+        self.app_brand_lbl.setProperty("typographyRole", "title")
+        self.app_brand_lbl.setMinimumWidth(0)
+        header_row.addWidget(self.app_brand_lbl, 1)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(SPACING_SM)
+        btn_row.setSpacing(LayoutMetrics.SPACING_SM)
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.space_audit_btn)
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.load_btn)
         btn_row.addWidget(self.open_reports_btn)
+        self.start_btn.setText("Start")
+        self.cancel_btn.setText("Cancel")
+        header_row.addWidget(self.start_btn, 0)
+        header_row.addWidget(self.cancel_btn, 0)
 
         tools_menu_btn = QToolButton()
         tools_menu_btn.setText("Tools / Logs")
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tools_menu = QMenu(tools_menu_btn)
+        header_row.addWidget(tools_menu_btn, 0)
+        actions_card = QGroupBox("Primary Actions")
+        actions_layout = QHBoxLayout(actions_card)
+        actions_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        actions_layout.setSpacing(LayoutMetrics.SPACING_SM)
+        actions_layout.addLayout(header_row)
+        main.addWidget(actions_card, 1)
 
-        btn_row.addWidget(tools_menu_btn)
-        btn_row.addStretch(1)
-        main.addLayout(btn_row)
+        status_card = QGroupBox("Status & Progress")
+        status_layout = QVBoxLayout(status_card)
+        status_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        status_layout.setSpacing(LayoutMetrics.SPACING_SM)
+        status_layout.addWidget(self.progress)
+        status_layout.addWidget(self.status_lbl)
+        status_layout.addWidget(self.scan_state_lbl)
+        status_layout.addWidget(self.remaining_lbl)
+        status_layout.addWidget(self.rclone_stats)
+        status_layout.addWidget(self.status_box)
+        main.addWidget(status_card, 1)
 
-        main.addWidget(self.progress)
-        main.addWidget(self.status_lbl)
-        main.addWidget(self.scan_state_lbl)
-        main.addWidget(self.remaining_lbl)
-        main.addWidget(self.rclone_stats)
-        main.addWidget(QLabel("Last run summary"))
-        main.addWidget(self.last_run_summary)
-        main.addWidget(self.status_box)
+        summary_card = QGroupBox("Last Run Summary")
+        summary_layout = QVBoxLayout(summary_card)
+        summary_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        summary_layout.setSpacing(LayoutMetrics.SPACING_SM)
+        summary_layout.addWidget(self.last_run_summary)
+        main.addWidget(summary_card, 1)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter = self.main_splitter
 
         left = QWidget()
         left_l = QVBoxLayout(left)
-        left_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        left_l.setSpacing(SPACING_SM)
+        left_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        left_l.setSpacing(LayoutMetrics.SPACING_SM)
         results_header = QLabel("Results")
         results_header.setStyleSheet(section_header_style)
+        results_header.setProperty("typographyRole", "section_header")
         left_l.addWidget(results_header)
         filters_row = QHBoxLayout()
         filters_row.addWidget(QLabel("Quick filters:"))
@@ -1182,22 +1305,24 @@ class MainWindow(QMainWindow):
         filters_row.addStretch(1)
         left_l.addLayout(filters_row)
         self.results_empty_lbl = QLabel("Run a scan to see duplicate groups.")
-        self.results_empty_lbl.setStyleSheet("QLabel { color: #6b7280; font-style: italic; }")
+        self.results_empty_lbl.setStyleSheet("QLabel { color: #94a3b8; font-style: italic; }")
         left_l.addWidget(self.results_empty_lbl)
-        left_l.addWidget(self.tabs)
+        left_l.addWidget(self.tabs, 1)
         splitter.addWidget(left)
 
         right = QWidget()
         right_l = QVBoxLayout(right)
-        right_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        right_l.setSpacing(SPACING_SM)
+        right_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        right_l.setSpacing(LayoutMetrics.SPACING_SM)
         actions_header_right = QLabel("Recommended Actions")
         actions_header_right.setStyleSheet(section_header_style)
+        actions_header_right.setProperty("typographyRole", "section_header")
         right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
-        right_l.addWidget(self.files_table)
+        right_l.addWidget(self.files_table, 1)
         self.row_hint_lbl = QLabel("Tip: Double-click a row to reveal in folder. Right-click for actions.")
-        self.row_hint_lbl.setStyleSheet("QLabel { color: #4b5563; }")
+        self.row_hint_lbl.setStyleSheet("QLabel { color: #cbd5e1; }")
+        self.row_hint_lbl.setProperty("typographyRole", "caption")
         right_l.addWidget(self.row_hint_lbl)
         self.detail_size_card = QLabel("Size: —")
         self.detail_mtime_card = QLabel("Modified: —")
@@ -1236,24 +1361,28 @@ class MainWindow(QMainWindow):
         right_l.addLayout(act_row)
 
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 4)
 
-        main.addWidget(splitter)
+        main.addWidget(splitter, 8)
+
+        main.setStretch(0, 1)
+        main.setStretch(1, 1)
+        main.setStretch(2, 1)
+        main.setStretch(3, 1)
+        main.setStretch(4, 8)
+
+        self._apply_size_policies()
 
         refresh_action = QAction("Clear results", self)
         refresh_action.triggered.connect(self.clear_results)
-        self.menuBar().addAction(refresh_action)
-
         open_reports_action = QAction("Open report folder", self)
         open_reports_action.triggered.connect(self.open_report_folder)
-        self.menuBar().addAction(open_reports_action)
 
         open_scan_err_action = QAction("Open scan_errors.txt", self)
         open_scan_err_action.triggered.connect(
             lambda: self.open_report_file("scan_errors.txt")
         )
-        self.menuBar().addAction(open_scan_err_action)
         self._apply_button_roles()
         self._apply_modern_theme()
         self._apply_tooltips()
@@ -1262,27 +1391,36 @@ class MainWindow(QMainWindow):
         open_hash_err_action.triggered.connect(
             lambda: self.open_report_file("hash_errors.txt")
         )
-        self.menuBar().addAction(open_hash_err_action)
-
         open_dupe_summary_action = QAction("Open duplicates_summary.txt", self)
         open_dupe_summary_action.triggered.connect(
             lambda: self.open_report_file("duplicates_summary.txt")
         )
-        self.menuBar().addAction(open_dupe_summary_action)
 
         open_delete_log_action = QAction("Open deletion_log.txt", self)
         open_delete_log_action.triggered.connect(
             lambda: self.open_report_file("deletion_log.txt")
         )
-        self.menuBar().addAction(open_delete_log_action)
-
+        non_destructive_hdr = QAction("General Utilities", self)
+        non_destructive_hdr.setEnabled(False)
+        tools_menu.addAction(non_destructive_hdr)
         tools_menu.addAction(refresh_action)
+        tools_menu.addAction(self.load_btn.text(), self.load_live_reports)
+        tools_menu.addAction(self.space_audit_btn.text(), self.start_space_audit)
         tools_menu.addAction(open_reports_action)
         tools_menu.addSeparator()
+        logs_hdr = QAction("Logs / Reports", self)
+        logs_hdr.setEnabled(False)
+        tools_menu.addAction(logs_hdr)
         tools_menu.addAction(open_scan_err_action)
         tools_menu.addAction(open_hash_err_action)
         tools_menu.addAction(open_dupe_summary_action)
         tools_menu.addAction(open_delete_log_action)
+        tools_menu.addSeparator()
+        destructive_hdr = QAction("Destructive Utilities", self)
+        destructive_hdr.setEnabled(False)
+        tools_menu.addAction(destructive_hdr)
+        tools_menu.addAction(self.auto_prune_btn.text(), self.auto_prune_by_preferred_path)
+        tools_menu.addAction(self.compare_prune_btn.text(), self.compare_prune_delete_a_using_b)
         tools_menu_btn.setMenu(tools_menu)
 
         neutral_btn_style = "QPushButton { font-weight: 500; }"
@@ -1359,6 +1497,49 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.exclude_add_btn, self.exclude_list)
         self._restore_ui_state()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_scan_setup_layout_mode()
+
+    def _set_form_layout_compact(self, form_layout: QFormLayout, compact: bool) -> None:
+        if compact:
+            form_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+            form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        else:
+            form_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+            form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+    def _update_scan_setup_layout_mode(self) -> None:
+        compact = self.width() < self.SCAN_SETUP_COMPACT_BREAKPOINT
+        mode = "compact" if compact else "wide"
+        if mode == self._scan_setup_mode:
+            return
+        self._scan_setup_mode = mode
+
+        self.scan_setup_grid.removeWidget(self.basic_group)
+        self.scan_setup_grid.removeWidget(self.adv_group)
+
+        if compact:
+            self.scan_setup_grid.addWidget(self.basic_group, 0, 0, 1, 2)
+            self.scan_setup_grid.addWidget(self.adv_group, 1, 0, 1, 2)
+        else:
+            self.scan_setup_grid.addWidget(self.basic_group, 0, 0)
+            self.scan_setup_grid.addWidget(self.adv_group, 0, 1)
+        self.scan_setup_grid.setColumnStretch(0, 1)
+        self.scan_setup_grid.setColumnStretch(1, 1)
+
+        self._set_form_layout_compact(self.basic_form, compact)
+        self._set_form_layout_compact(self.adv_form, compact)
+
+        if compact:
+            self.exclude_token_row.setDirection(QBoxLayout.Direction.TopToBottom)
+            self.exclude_add_btn.setMaximumWidth(140)
+        else:
+            self.exclude_token_row.setDirection(QBoxLayout.Direction.LeftToRight)
+            self.exclude_add_btn.setMaximumWidth(16777215)
+
     def _set_badge(self, lbl: QLabel, text: str) -> None:
         if text:
             lbl.setText(f"⚠ {text}")
@@ -1366,6 +1547,41 @@ class MainWindow(QMainWindow):
         else:
             lbl.setText("")
 
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_splitter_layout_mode()
+
+    def _update_splitter_layout_mode(self) -> None:
+        if not hasattr(self, "main_splitter"):
+            return
+        desired = Qt.Orientation.Vertical if self.width() < self._compact_mode_breakpoint else Qt.Orientation.Horizontal
+        if self.main_splitter.orientation() != desired:
+            self.main_splitter.setOrientation(desired)
+            if desired == Qt.Orientation.Vertical:
+                self.main_splitter.setSizes([max(280, int(self.height() * 0.55)), max(240, int(self.height() * 0.45))])
+            else:
+                self.main_splitter.setSizes([max(320, int(self.width() * 0.45)), max(320, int(self.width() * 0.55))])
+
+    def run_resize_sanity_checks(self) -> list[tuple[int, bool, str]]:
+        widths = [900, 1100, 1366, 1920]
+        heights = {900: 900, 1100: 900, 1366: 900, 1920: 1000}
+        checks: list[tuple[int, bool, str]] = []
+        for w in widths:
+            self.resize(w, heights[w])
+            QApplication.processEvents()
+            controls = [
+                self.root_edit, self.browse_root_btn, self.report_edit, self.browse_report_btn,
+                self.start_btn, self.cancel_btn, self.load_btn, self.open_reports_btn
+            ]
+            overlaps = []
+            for i, a in enumerate(controls):
+                ga = a.geometry()
+                for b in controls[i + 1:]:
+                    if ga.intersects(b.geometry()):
+                        overlaps.append(f"{a.objectName() or a.__class__.__name__}:{b.objectName() or b.__class__.__name__}")
+            checks.append((w, len(overlaps) == 0, ", ".join(overlaps) if overlaps else "no overlaps"))
+        return checks
     def validate_setup_fields(self) -> None:
         root = Path(self.root_edit.text().strip()) if self.root_edit.text().strip() else None
         report = Path(self.report_edit.text().strip()) if self.report_edit.text().strip() else None
@@ -1673,11 +1889,20 @@ class MainWindow(QMainWindow):
 
     def _persist_last_run_summary(self, text: str) -> None:
         QSettings("DupeFinder", "DupeFinderGUI").setValue("last_run_summary", text)
+        self._refresh_summary_placeholders()
 
     def _restore_last_run_summary(self) -> None:
         text = QSettings("DupeFinder", "DupeFinderGUI").value("last_run_summary", "", type=str)
         if text:
             self.last_run_summary.setPlainText(text)
+        self._refresh_summary_placeholders()
+
+    def _refresh_summary_placeholders(self) -> None:
+        has_last_summary = bool(self.last_run_summary.toPlainText().strip())
+        if has_last_summary:
+            self.last_run_summary.setMaximumHeight(16777215)
+        else:
+            self.last_run_summary.setMaximumHeight(110)
 
     def _make_run_report_dir(self, reports_root: Path, scan_root: Path) -> Path:
         def safe_tag(s: str) -> str:
@@ -1733,12 +1958,56 @@ class MainWindow(QMainWindow):
 
 
     def _init_ui_system(self) -> None:
-        # QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-        # QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
         # Qt 6 enables high-DPI behavior by default; setting deprecated flags raises warnings.
         font = QFont()
         font.setPointSize(UITheme.TYPE_SCALE["md"])
         QApplication.instance().setFont(font)
+
+    def _apply_size_policies(self) -> None:
+        label_widgets = [
+            self.status_lbl,
+            self.scan_state_lbl,
+            self.remaining_lbl,
+            self.rclone_stats,
+            self.results_empty_lbl,
+            self.row_hint_lbl,
+            self.detail_size_card,
+            self.detail_mtime_card,
+            self.detail_path_card,
+        ]
+        for widget in label_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+        input_widgets = [
+            self.root_edit,
+            self.root2_edit,
+            self.report_edit,
+            self.exclude_input,
+            self.prefer_path_edit,
+            self.trash_folder_edit,
+            self.min_size_spin,
+            self.delete_mode,
+        ]
+        for widget in input_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        expanding_widgets = [
+            self.status_box,
+            self.last_run_summary,
+            self.tabs,
+            self.files_table,
+            self.findings_summary,
+            self.monitor_spikes_table,
+            self.ai_findings_table,
+            self.monitor_spark_view,
+        ]
+        for widget in expanding_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.tabs.setMinimumHeight(280)
+        self.files_table.setMinimumHeight(220)
+        self.findings_summary.setMinimumHeight(140)
+        self.last_run_summary.setMinimumHeight(80)
 
     def _apply_action_icons(self) -> None:
         icon_map = {
@@ -1764,28 +2033,87 @@ class MainWindow(QMainWindow):
             QWidget {{
                 background: {palette['surface']};
                 color: {palette['text']};
-                font-size: {UITheme.TYPE_SCALE['md']}px;
+                font-size: {UITheme.TYPOGRAPHY['body']['size']}px;
+                line-height: {UITheme.TYPOGRAPHY['body']['line_height']};
+            }}
+            QLabel {{
+                padding-top: 2px;
+                padding-bottom: 2px;
+            }}
+            QLabel[typographyRole="title"] {{
+                font-size: {UITheme.TYPOGRAPHY['title']['size']}px;
+                font-weight: {UITheme.TYPOGRAPHY['title']['weight']};
+            }}
+            QLabel[typographyRole="section_header"] {{
+                font-size: {UITheme.TYPOGRAPHY['section_header']['size']}px;
+                font-weight: {UITheme.TYPOGRAPHY['section_header']['weight']};
+            }}
+            QLabel[typographyRole="caption"] {{
+                font-size: {UITheme.TYPOGRAPHY['caption']['size']}px;
+                font-weight: {UITheme.TYPOGRAPHY['caption']['weight']};
+                color: {palette['text_muted']};
             }}
             QGroupBox, QTabWidget::pane, QTableWidget, QTextEdit, QListWidget, QTreeWidget, QLineEdit, QComboBox, QSpinBox {{
                 background: {palette['surface_alt']};
                 border: 1px solid {palette['border']};
                 border-radius: {UITheme.CORNER_RADIUS}px;
             }}
-            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox {{
+            QPushButton, QToolButton, QComboBox, QLineEdit, QSpinBox, QTextEdit {{
                 min-height: {UITheme.TOUCH_TARGET}px;
                 border-radius: {UITheme.CORNER_RADIUS}px;
-                padding: 6px 10px;
+                padding: 8px 10px;
             }}
             QPushButton:hover, QToolButton:hover {{ background: #243447; }}
             QPushButton:pressed, QToolButton:pressed {{ background: #334155; }}
             QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus,
-            QSpinBox:focus, QListWidget:focus, QTreeWidget:focus, QTableWidget:focus {{
-                border: 2px solid {palette['focus']};
-                outline: none;
+            QSpinBox:focus, QListWidget:focus, QTreeWidget:focus, QTableWidget:focus, QTextEdit:focus {{
+                border: 1px solid {palette['focus']};
+                outline: 2px solid {palette['focus']};
+                outline-offset: 1px;
+            }}
+            QWidget:disabled {{
+                color: #94a3b8;
+            }}
+            QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QTextEdit:disabled, QListWidget:disabled {{
+                background: #1b2638;
+                color: #9ca3af;
+                border: 1px solid #475569;
             }}
             QLabel[statusRole="warning"] {{ color: {palette['warning']}; font-weight: 700; }}
             QLabel[statusRole="danger"] {{ color: {palette['danger']}; font-weight: 700; }}
             QLabel[statusRole="success"] {{ color: {palette['success']}; font-weight: 700; }}
+            QPushButton[buttonRole="primary"] {{
+                background-color: #2563eb;
+                color: #ffffff;
+                border: 1px solid #1d4ed8;
+                font-weight: 600;
+            }}
+            QPushButton[buttonRole="primary"]:hover {{ background-color: #1d4ed8; }}
+            QPushButton[buttonRole="primary"]:pressed {{ background-color: #1e40af; }}
+            QPushButton[buttonRole="primary"]:disabled {{ background-color: #334155; color: #cbd5e1; border: 1px solid #475569; }}
+            QPushButton[buttonRole="secondary"] {{
+                background-color: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #475569;
+            }}
+            QPushButton[buttonRole="secondary"]:hover {{ background-color: #334155; }}
+            QPushButton[buttonRole="secondary"]:pressed {{ background-color: #475569; }}
+            QPushButton[buttonRole="secondary"]:disabled {{ background-color: #1f2937; color: #94a3b8; border: 1px solid #334155; }}
+            QPushButton[buttonRole="destructive"] {{
+                background-color: #dc2626;
+                color: #ffffff;
+                border: 1px solid #b91c1c;
+                font-weight: 600;
+            }}
+            QPushButton[buttonRole="destructive"]:hover {{ background-color: #b91c1c; }}
+            QPushButton[buttonRole="destructive"]:pressed {{ background-color: #991b1b; }}
+            QPushButton[buttonRole="destructive"]:disabled {{ background-color: #7f1d1d; color: #fecaca; border: 1px solid #7f1d1d; }}
+            QToolTip {{
+                background-color: #111827;
+                color: #f9fafb;
+                border: 1px solid #374151;
+                padding: 4px 6px;
+            }}
         """)
         self.monitor_is_read_only_lbl.setProperty("statusRole", "danger")
         self.monitor_alert_lbl.setProperty("statusRole", "success")
@@ -1824,54 +2152,8 @@ class MainWindow(QMainWindow):
             btn.setProperty("buttonRole", "secondary")
         for btn in destructive_buttons:
             btn.setProperty("buttonRole", "destructive")
-        self.setStyleSheet(
-            """
-            QPushButton[buttonRole="primary"] {
-                background-color: #1f6feb;
-                color: #ffffff;
-                border: 1px solid #1a5fcc;
-                font-weight: 600;
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QPushButton[buttonRole="primary"]:disabled {
-                background-color: #9bbcf2;
-                color: #f4f7fc;
-                border: 1px solid #7da5e9;
-            }
-            QPushButton[buttonRole="secondary"] {
-                background-color: #f3f4f6;
-                color: #1f2937;
-                border: 1px solid #c8ced8;
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QPushButton[buttonRole="secondary"]:disabled {
-                background-color: #eceff3;
-                color: #67768a;
-                border: 1px solid #d3d9e2;
-            }
-            QPushButton[buttonRole="destructive"] {
-                background-color: #c0392b;
-                color: #ffffff;
-                border: 1px solid #a93226;
-                font-weight: 600;
-                padding: 6px 10px;
-                border-radius: 4px;
-            }
-            QPushButton[buttonRole="destructive"]:disabled {
-                background-color: #e8b3ad;
-                color: #fff8f7;
-                border: 1px solid #d99d97;
-            }
-            QToolTip {
-                background-color: #111827;
-                color: #f9fafb;
-                border: 1px solid #374151;
-                padding: 4px 6px;
-            }
-            """
-        )
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def _apply_tooltips(self) -> None:
         self.space_audit_btn.setToolTip("Review disk usage trends and largest folders.")
@@ -2892,7 +3174,6 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     w = MainWindow()
-    w.resize(1200, 720)
     w.show()
     return app.exec()
 
