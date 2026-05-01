@@ -45,3 +45,20 @@ Assume attackers can:
 - Malformed artifact parsing resilience.
 - Prompt-injection redaction and policy retention.
 - Plugin failure isolation.
+
+## Data handling defaults and compliance controls
+
+- **Policy-driven retention schedules** are tracked per artifact family:
+  - prune audit logs,
+  - free-space/watch timelines,
+  - AI findings outputs,
+  - incident evidence bundles.
+- **Redaction and PII handling defaults** are profile-based (`strict`, `balanced`, `forensic`) with redaction field controls for usernames, hostnames, process args, and path segments.
+- **Secure export packages** use bundle manifests and can be policy-configured for password-based encryption when sharing outside trusted environments.
+- **AI operating mode documentation** is embedded in evidence as `data_handling_mode`:
+  - `local_only`: model/provider disabled; analysis stays on device.
+  - `cloud_assisted`: provider enabled with explicit consent state captured.
+- **Admin controls** are captured for compliance evidence:
+  - audit logging enabled/disabled state,
+  - deletion control posture (`policy_guarded` by default),
+  - compliance evidence capture toggle.
