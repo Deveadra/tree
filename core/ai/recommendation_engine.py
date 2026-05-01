@@ -119,12 +119,45 @@ def _risk_tier(risk_score: float, thresholds: dict[str, float]) -> str:
     return "Dangerous"
 
 
+def _normalize_metrics(metrics: dict[str, Any]) -> dict[str, float]:
+    alias_map = {
+        "free_delta_ratio": "free_delta_ratio",
+        "top_dir_growth_ratio": "top_dir_growth_ratio",
+        "process_io_ratio": "process_io_ratio",
+        "duplicate_reclaim_ratio": "duplicate_reclaim_ratio",
+        "cold_data_ratio": "cold_data_ratio",
+        "growth_reclaim_ratio": "growth_reclaim_ratio",
+    }
+    normalized: dict[str, float] = {}
+    for raw_key, canonical in alias_map.items():
+        normalized[canonical] = _clamp01(_safe_float(metrics.get(raw_key, 0.0)))
+    growth_windows = metrics.get("growth_windows", {}) if isinstance(metrics.get("growth_windows"), dict) else {}
+    normalized["growth_windows"] = {str(k): _clamp01(_safe_float(v, 0.0)) for k, v in growth_windows.items()}
+    return normalized
+
+
+def _normalize_candidate(candidate: dict[str, Any], idx: int) -> dict[str, Any]:
+    metrics = candidate.get("metrics", {}) if isinstance(candidate.get("metrics"), dict) else {}
+    evidence_refs = candidate.get("evidence_refs")
+    refs = [sanitize_untrusted_text(str(r))[:300] for r in evidence_refs] if isinstance(evidence_refs, list) else []
+    alternatives = candidate.get("alternatives")
+    alternatives_list = [sanitize_untrusted_text(str(a))[:300] for a in alternatives] if isinstance(alternatives, list) else []
+    return {
+        **candidate,
+        "id": candidate.get("id", f"candidate-{idx}"),
+        "title": candidate.get("title", "Recommendation"),
+        "metrics": _normalize_metrics(metrics),
+        "evidence_refs": refs,
+        "alternatives": alternatives_list,
+    }
+
+
 def _extract_candidates(evidence: dict[str, Any]) -> list[dict[str, Any]]:
     # Accept explicit candidates, or build a default candidate from global evidence.
     raw = evidence.get("recommendation_candidates")
     if isinstance(raw, list) and raw:
-        return [c for c in raw if isinstance(c, dict)]
-    return [{"id": "global", "title": "General cleanup plan", "metrics": evidence.get("metrics", {})}]
+        return [_normalize_candidate(c, idx) for idx, c in enumerate(raw) if isinstance(c, dict)]
+    return [_normalize_candidate({"id": "global", "title": "General cleanup plan", "metrics": evidence.get("metrics", {})}, 0)]
 
 
 def _default_summary(rec: dict[str, Any]) -> str:
@@ -251,13 +284,15 @@ def build_recommendations(
 
         redaction_policy = evidence.get("redaction_policy", {}) if isinstance(evidence.get("redaction_policy"), dict) else {}
         rec = {
-            "id": candidate.get("id", f"candidate-{idx}"),
-            "title": candidate.get("title", "Recommendation"),
+            "id": candidate["id"],
+            "title": candidate["title"],
             "root_cause_score": root_cause_score,
             "reclaim_opportunity_score": reclaim_score,
             "risk_score": risk_score,
             "risk_tier": tier,
             "confidence_score": _confidence_from_scores(root_cause_score, reclaim_score, risk_score),
+            "evidence_refs": list(candidate.get("evidence_refs", [])),
+            "alternatives": list(candidate.get("alternatives", [])),
             "score_components": {
                 "root_cause": root_components,
                 "reclaim_opportunity": reclaim_components,
@@ -309,12 +344,13 @@ def build_recommendations(
                 rec["action_steps"] = []
                 rec["contains_irreversible_steps"] = False
                 rec["risk_tier"] = "Dangerous"
+                rec["plan_status"] = "rejected_policy_conflict"
         else:
             rec["protection_policy_validation"] = {
                 "ok": True,
                 "violations": [],
             }
-
+            rec["plan_status"] = "accepted"
         evidence_key = _evidence_hash(
             {
                 "candidate": candidate,
@@ -394,6 +430,7 @@ def build_recommendations(
         },
         "deterministic": True,
         "metadata": {
+            "evidence_contract": {"schema": "ai-recommendation-evidence", "version": "1.1"},
             "analysis_window_applied": len(candidates),
             "execution": {
                 "token_budget_per_run": execution_config.token_budget_per_run,
