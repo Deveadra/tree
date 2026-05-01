@@ -67,6 +67,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QToolButton,
+    QToolButton,
+    QMenu,
 )
 
 from core.service import (
@@ -724,6 +726,10 @@ class PrefixSuggestDialog(QDialog):
 # Main Window
 # ----------------------------
 
+SPACING_SM = 8
+SPACING_MD = 14
+SPACING_LG = 20
+
 
 class MainWindow(QMainWindow):
     WARNING_TEXTS = {
@@ -822,6 +828,7 @@ class MainWindow(QMainWindow):
         self.status_box.setFixedHeight(110)
 
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("QTabWidget::pane { padding: 12px; }")
         self.monitor_tab = QWidget()
         self.monitor_is_read_only_lbl = QLabel("Read-only monitor (no filesystem writes or delete actions).")
         self.monitor_is_read_only_lbl.setStyleSheet("QLabel { color: #8b0000; font-weight: 700; }")
@@ -853,7 +860,7 @@ class MainWindow(QMainWindow):
         self.ai_findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.ai_findings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.ai_findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.ai_why_btn = QPushButton("Why this?")
+        self.ai_why_btn = QPushButton("Why this finding?")
         self.ai_why_btn.setEnabled(False)
         self.ai_action_btn = QPushButton("Apply finding recommendation…")
         self.ai_action_btn.setEnabled(False)
@@ -877,7 +884,7 @@ class MainWindow(QMainWindow):
         self.plan_state_combo = QComboBox()
         self.plan_state_combo.addItems(["draft", "reviewed", "approved", "executed"])
         self.plan_state_combo.setCurrentText("draft")
-        self.plan_advance_btn = QPushButton("Advance state")
+        self.plan_advance_btn = QPushButton("Advance plan state")
         self.monitor_interval_spin = QSpinBox()
         self.monitor_interval_spin.setRange(1, 3600)
         self.monitor_interval_spin.setValue(30)
@@ -983,28 +990,46 @@ class MainWindow(QMainWindow):
 
         self.suggest_keep_paths_btn = QPushButton("Suggest keep paths…")
         self.suggest_keep_paths_btn.setEnabled(False)
-        self.suggest_paths_btn = QPushButton("Suggest/Rank paths…")
+        self.suggest_paths_btn = QPushButton("Recommend Keep Locations")
 
-        self.analyze_paths_btn = QPushButton("Analyze paths (suggest prefixes)")
+        self.analyze_paths_btn = QPushButton("Analyze Storage Patterns")
 
         self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
         self.trash_folder_edit.setClearButtonEnabled(True)
         self.trash_folder_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
 
-        self.keep_delete_btn = QPushButton("Keep Selected & Delete Others")
+        self.keep_delete_btn = QPushButton("Delete Duplicates (Keep Selected)")
         self.open_file_btn = QPushButton("Open selected file")
         self.open_folder_btn = QPushButton("Open containing folder")
 
         top = QWidget()
         self.setCentralWidget(top)
         main = QVBoxLayout(top)
+        main.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
+        main.setSpacing(SPACING_MD)
+
+        section_header_style = "QLabel { font-size: 15px; font-weight: 700; }"
+        self.start_btn.setStyleSheet("QPushButton { font-weight: 700; padding: 8px 14px; }")
+
+        scan_setup_header = QLabel("Scan Setup")
+        scan_setup_header.setStyleSheet(section_header_style)
+        main.addWidget(scan_setup_header)
+
+        scan_setup_card = QGroupBox()
+        scan_setup_card_layout = QVBoxLayout(scan_setup_card)
+        scan_setup_card_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        scan_setup_card_layout.setSpacing(SPACING_MD)
 
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(SPACING_MD)
+        form.setVerticalSpacing(SPACING_SM)
 
         basic_group = QGroupBox("Scan setup")
         basic_form = QFormLayout()
         root_row = QHBoxLayout()
+        root_row.setSpacing(SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
         self.root_badge = QLabel("")
@@ -1015,6 +1040,7 @@ class MainWindow(QMainWindow):
         basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
 
         root2_row = QHBoxLayout()
+        root2_row.setSpacing(SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
         self.root2_badge = QLabel("")
@@ -1022,6 +1048,7 @@ class MainWindow(QMainWindow):
         basic_form.addRow("", self.root2_badge)
 
         rep_row = QHBoxLayout()
+        rep_row.setSpacing(SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
         self.report_badge = QLabel("")
@@ -1046,17 +1073,35 @@ class MainWindow(QMainWindow):
         adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
         adv_group.setLayout(adv_form)
         form.addRow(adv_group)
+        form.addRow("Reports root:", rep_row)
+
+        form.addRow("Min file size:", self.min_size_spin)
+        form.addRow("Excludes (names or full paths):", self.exclude_edit)
+        form.addRow("", self.follow_symlinks_chk)
+        scan_setup_card_layout.addLayout(form)
+        main.addWidget(scan_setup_card)
+
+        actions_header = QLabel("Primary Actions")
+        actions_header.setStyleSheet(section_header_style)
+        main.addWidget(actions_header)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(SPACING_SM)
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.space_audit_btn)
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.load_btn)
         btn_row.addWidget(self.open_reports_btn)
-        btn_row.addStretch(1)
-        form.addRow("", btn_row)
 
-        main.addLayout(form)
+        tools_menu_btn = QToolButton()
+        tools_menu_btn.setText("Tools / Logs")
+        tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tools_menu = QMenu(tools_menu_btn)
+
+        btn_row.addWidget(tools_menu_btn)
+        btn_row.addStretch(1)
+        main.addLayout(btn_row)
+
         main.addWidget(self.progress)
         main.addWidget(self.status_lbl)
         main.addWidget(self.remaining_lbl)
@@ -1067,11 +1112,21 @@ class MainWindow(QMainWindow):
 
         left = QWidget()
         left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        left_l.setSpacing(SPACING_SM)
+        results_header = QLabel("Results")
+        results_header.setStyleSheet(section_header_style)
+        left_l.addWidget(results_header)
         left_l.addWidget(self.tabs)
         splitter.addWidget(left)
 
         right = QWidget()
         right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
+        right_l.setSpacing(SPACING_SM)
+        actions_header_right = QLabel("Recommended Actions")
+        actions_header_right.setStyleSheet(section_header_style)
+        right_l.addWidget(actions_header_right)
         right_l.addWidget(QLabel("Files in selected duplicate group:"))
         right_l.addWidget(self.files_table)
 
@@ -1110,7 +1165,7 @@ class MainWindow(QMainWindow):
 
         main.addWidget(splitter)
 
-        refresh_action = QAction("Clear Results", self)
+        refresh_action = QAction("Clear results", self)
         refresh_action.triggered.connect(self.clear_results)
         self.menuBar().addAction(refresh_action)
 
@@ -1123,6 +1178,8 @@ class MainWindow(QMainWindow):
             lambda: self.open_report_file("scan_errors.txt")
         )
         self.menuBar().addAction(open_scan_err_action)
+        self._apply_button_roles()
+        self._apply_tooltips()
 
         open_hash_err_action = QAction("Open hash_errors.txt", self)
         open_hash_err_action.triggered.connect(
@@ -1141,6 +1198,19 @@ class MainWindow(QMainWindow):
             lambda: self.open_report_file("deletion_log.txt")
         )
         self.menuBar().addAction(open_delete_log_action)
+
+        tools_menu.addAction(refresh_action)
+        tools_menu.addAction(open_reports_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(open_scan_err_action)
+        tools_menu.addAction(open_hash_err_action)
+        tools_menu.addAction(open_dupe_summary_action)
+        tools_menu.addAction(open_delete_log_action)
+        tools_menu_btn.setMenu(tools_menu)
+
+        neutral_btn_style = "QPushButton { font-weight: 500; }"
+        for _btn in (self.space_audit_btn, self.cancel_btn, self.load_btn, self.open_reports_btn):
+            _btn.setStyleSheet(neutral_btn_style)
 
         self.prefer_path_btn.clicked.connect(self.pick_prefer_path)
         self.auto_prune_btn.clicked.connect(self.auto_prune_by_preferred_path)
@@ -1556,6 +1626,101 @@ class MainWindow(QMainWindow):
             os.startfile(str(p))
         except Exception as e:
             QMessageBox.warning(self, "Open failed", str(e))
+
+    def _apply_button_roles(self) -> None:
+        primary_buttons = [
+            self.start_btn,
+            self.monitor_start_btn,
+            self.monitor_resume_btn,
+            self.ai_action_btn,
+            self.plan_advance_btn,
+        ]
+        secondary_buttons = [
+            self.cancel_btn,
+            self.load_btn,
+            self.open_reports_btn,
+            self.space_audit_btn,
+            self.open_evidence_btn,
+            self.ai_why_btn,
+            self.investigate_btn,
+            self.monitor_pause_btn,
+            self.prefer_path_btn,
+            self.auto_prune_btn,
+            self.compare_prune_btn,
+            self.suggest_keep_paths_btn,
+            self.suggest_paths_btn,
+            self.analyze_paths_btn,
+            self.trash_folder_btn,
+            self.open_file_btn,
+            self.open_folder_btn,
+        ]
+        destructive_buttons = [self.keep_delete_btn]
+        for btn in primary_buttons:
+            btn.setProperty("buttonRole", "primary")
+        for btn in secondary_buttons:
+            btn.setProperty("buttonRole", "secondary")
+        for btn in destructive_buttons:
+            btn.setProperty("buttonRole", "destructive")
+        self.setStyleSheet(
+            """
+            QPushButton[buttonRole="primary"] {
+                background-color: #1f6feb;
+                color: #ffffff;
+                border: 1px solid #1a5fcc;
+                font-weight: 600;
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QPushButton[buttonRole="primary"]:disabled {
+                background-color: #9bbcf2;
+                color: #f4f7fc;
+                border: 1px solid #7da5e9;
+            }
+            QPushButton[buttonRole="secondary"] {
+                background-color: #f3f4f6;
+                color: #1f2937;
+                border: 1px solid #c8ced8;
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QPushButton[buttonRole="secondary"]:disabled {
+                background-color: #eceff3;
+                color: #67768a;
+                border: 1px solid #d3d9e2;
+            }
+            QPushButton[buttonRole="destructive"] {
+                background-color: #c0392b;
+                color: #ffffff;
+                border: 1px solid #a93226;
+                font-weight: 600;
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QPushButton[buttonRole="destructive"]:disabled {
+                background-color: #e8b3ad;
+                color: #fff8f7;
+                border: 1px solid #d99d97;
+            }
+            QToolTip {
+                background-color: #111827;
+                color: #f9fafb;
+                border: 1px solid #374151;
+                padding: 4px 6px;
+            }
+            """
+        )
+
+    def _apply_tooltips(self) -> None:
+        self.space_audit_btn.setToolTip("Review disk usage trends and largest folders.")
+        self.load_btn.setToolTip("Load a previous scan without starting a new one.")
+        self.suggest_keep_paths_btn.setToolTip("Suggest keep-path prefixes based on compare results.")
+        self.suggest_paths_btn.setToolTip("Recommend top locations to keep files from.")
+        self.analyze_paths_btn.setToolTip("Analyze Storage Patterns and suggest useful prefixes.")
+        self.auto_prune_btn.setToolTip("Build a keep/delete plan using your preferred keep path.")
+        self.compare_prune_btn.setToolTip("Create a delete plan for Root A when matching files exist in Root B.")
+        self.keep_delete_btn.setToolTip("Delete duplicate files and keep only your selected file.")
+        self.ai_action_btn.setToolTip("Apply the selected finding's recommended action.")
+        self.plan_advance_btn.setToolTip("Move the plan to its next approval state.")
 
     def _reports_root_dir(self) -> Path:
         return Path(self.report_edit.text().strip() or str(self.reports_root))
