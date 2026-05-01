@@ -33,7 +33,7 @@ from PySide6.QtCore import (
     Slot,
     QSize,
 )
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtGui import QAction, QFont, QIcon, QFontMetrics
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -68,9 +68,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QToolButton,
-    QToolButton,
     QMenu,
     QStyle,
+    QSizePolicy,
 )
 
 from core.service import (
@@ -755,6 +755,28 @@ SPACING_MD = 14
 SPACING_LG = 20
 
 
+
+
+class ElidedLabel(QLabel):
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full_text = text
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self._full_text = text
+        fm = QFontMetrics(self.font())
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, max(0, self.width() - 4))
+        super().setText(elided)
+        self.setToolTip(text if elided != text else "")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        self.setText(self._full_text)
+        super().resizeEvent(event)
+
+
 class MainWindow(QMainWindow):
     WARNING_TEXTS = {
         "risk_mode_blocked_title": "Risk mode transition blocked",
@@ -1122,26 +1144,24 @@ class MainWindow(QMainWindow):
         scan_setup_card_layout.addLayout(form)
         main.addWidget(scan_setup_card)
 
-        actions_header = QLabel("Primary Actions")
-        actions_header.setStyleSheet(section_header_style)
-        main.addWidget(actions_header)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(SPACING_SM)
+        self.app_brand_lbl = ElidedLabel("Dupe Finder Pro — Safe Duplicate Discovery & Cleanup")
+        self.app_brand_lbl.setStyleSheet(section_header_style)
+        self.app_brand_lbl.setMinimumWidth(0)
+        header_row.addWidget(self.app_brand_lbl, 1)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(SPACING_SM)
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.space_audit_btn)
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.load_btn)
-        btn_row.addWidget(self.open_reports_btn)
+        self.start_btn.setText("Start")
+        self.cancel_btn.setText("Cancel")
+        header_row.addWidget(self.start_btn, 0)
+        header_row.addWidget(self.cancel_btn, 0)
 
         tools_menu_btn = QToolButton()
         tools_menu_btn.setText("Tools / Logs")
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tools_menu = QMenu(tools_menu_btn)
-
-        btn_row.addWidget(tools_menu_btn)
-        btn_row.addStretch(1)
-        main.addLayout(btn_row)
+        header_row.addWidget(tools_menu_btn, 0)
+        main.addLayout(header_row)
 
         main.addWidget(self.progress)
         main.addWidget(self.status_lbl)
@@ -1234,17 +1254,13 @@ class MainWindow(QMainWindow):
 
         refresh_action = QAction("Clear results", self)
         refresh_action.triggered.connect(self.clear_results)
-        self.menuBar().addAction(refresh_action)
-
         open_reports_action = QAction("Open report folder", self)
         open_reports_action.triggered.connect(self.open_report_folder)
-        self.menuBar().addAction(open_reports_action)
 
         open_scan_err_action = QAction("Open scan_errors.txt", self)
         open_scan_err_action.triggered.connect(
             lambda: self.open_report_file("scan_errors.txt")
         )
-        self.menuBar().addAction(open_scan_err_action)
         self._apply_button_roles()
         self._apply_modern_theme()
         self._apply_tooltips()
@@ -1253,27 +1269,36 @@ class MainWindow(QMainWindow):
         open_hash_err_action.triggered.connect(
             lambda: self.open_report_file("hash_errors.txt")
         )
-        self.menuBar().addAction(open_hash_err_action)
-
         open_dupe_summary_action = QAction("Open duplicates_summary.txt", self)
         open_dupe_summary_action.triggered.connect(
             lambda: self.open_report_file("duplicates_summary.txt")
         )
-        self.menuBar().addAction(open_dupe_summary_action)
 
         open_delete_log_action = QAction("Open deletion_log.txt", self)
         open_delete_log_action.triggered.connect(
             lambda: self.open_report_file("deletion_log.txt")
         )
-        self.menuBar().addAction(open_delete_log_action)
-
+        non_destructive_hdr = QAction("General Utilities", self)
+        non_destructive_hdr.setEnabled(False)
+        tools_menu.addAction(non_destructive_hdr)
         tools_menu.addAction(refresh_action)
+        tools_menu.addAction(self.load_btn.text(), self.load_live_reports)
+        tools_menu.addAction(self.space_audit_btn.text(), self.start_space_audit)
         tools_menu.addAction(open_reports_action)
         tools_menu.addSeparator()
+        logs_hdr = QAction("Logs / Reports", self)
+        logs_hdr.setEnabled(False)
+        tools_menu.addAction(logs_hdr)
         tools_menu.addAction(open_scan_err_action)
         tools_menu.addAction(open_hash_err_action)
         tools_menu.addAction(open_dupe_summary_action)
         tools_menu.addAction(open_delete_log_action)
+        tools_menu.addSeparator()
+        destructive_hdr = QAction("Destructive Utilities", self)
+        destructive_hdr.setEnabled(False)
+        tools_menu.addAction(destructive_hdr)
+        tools_menu.addAction(self.auto_prune_btn.text(), self.auto_prune_by_preferred_path)
+        tools_menu.addAction(self.compare_prune_btn.text(), self.compare_prune_delete_a_using_b)
         tools_menu_btn.setMenu(tools_menu)
 
         neutral_btn_style = "QPushButton { font-weight: 500; }"
