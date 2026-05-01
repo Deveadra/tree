@@ -245,3 +245,12 @@ After the branch exists on the remote, rerun the setup/fetch step.
 
 - CI gate workflow: `.github/workflows/ci.yml` (A-E gate jobs + release blocker).
 - Release checklist: `docs/release_checklist.md`.
+
+## Release security and reproducibility
+
+Release hardening assets live under `scripts/release/` and `docs/security/release_signing_and_verification.md`:
+- deterministic multi-platform artifact builders,
+- checksum generation and CI verification,
+- SBOM + provenance generation,
+- artifact signing and user verification steps,
+- secure upgrade and rollback procedures.

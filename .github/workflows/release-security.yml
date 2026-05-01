@@ -1,0 +1,48 @@
+name: release-security
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install release tools
+        run: |
+          pip install syft
+
+      - name: Build deterministic artifacts
+        run: |
+          python scripts/release/build_artifacts.py --platform linux
+          python scripts/release/build_artifacts.py --platform macos
+          python scripts/release/build_artifacts.py --platform windows
+
+      - name: Generate checksums, SBOM, provenance
+        run: python scripts/release/generate_release_metadata.py --version ${GITHUB_REF_NAME:-dev}
+
+      - name: Verify artifact checksums in CI
+        run: python scripts/release/verify_checksums.py --dist dist
+
+      - name: Sign artifacts with cosign
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          for file in dist/*; do
+            [ -f "$file" ] || continue
+            cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY "$file" --output-signature "$file.sig"
+          done
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-security-bundle
+          path: dist/
