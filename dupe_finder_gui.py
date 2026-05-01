@@ -837,7 +837,7 @@ class MainWindow(QMainWindow):
         self.ai_findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.ai_findings_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.ai_findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.ai_why_btn = QPushButton("Why this?")
+        self.ai_why_btn = QPushButton("Why this finding?")
         self.ai_why_btn.setEnabled(False)
         self.ai_action_btn = QPushButton("Apply finding recommendation…")
         self.ai_action_btn.setEnabled(False)
@@ -861,7 +861,7 @@ class MainWindow(QMainWindow):
         self.plan_state_combo = QComboBox()
         self.plan_state_combo.addItems(["draft", "reviewed", "approved", "executed"])
         self.plan_state_combo.setCurrentText("draft")
-        self.plan_advance_btn = QPushButton("Advance state")
+        self.plan_advance_btn = QPushButton("Advance plan state")
         self.monitor_interval_spin = QSpinBox()
         self.monitor_interval_spin.setRange(1, 3600)
         self.monitor_interval_spin.setValue(30)
@@ -967,14 +967,14 @@ class MainWindow(QMainWindow):
 
         self.suggest_keep_paths_btn = QPushButton("Suggest keep paths…")
         self.suggest_keep_paths_btn.setEnabled(False)
-        self.suggest_paths_btn = QPushButton("Suggest/Rank paths…")
+        self.suggest_paths_btn = QPushButton("Recommend Keep Locations")
 
-        self.analyze_paths_btn = QPushButton("Analyze paths (suggest prefixes)")
+        self.analyze_paths_btn = QPushButton("Analyze Storage Patterns")
 
         self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
 
-        self.keep_delete_btn = QPushButton("Keep Selected & Delete Others")
+        self.keep_delete_btn = QPushButton("Delete Duplicates (Keep Selected)")
         self.open_file_btn = QPushButton("Open selected file")
         self.open_folder_btn = QPushButton("Open containing folder")
 
@@ -1068,7 +1068,7 @@ class MainWindow(QMainWindow):
 
         main.addWidget(splitter)
 
-        refresh_action = QAction("Clear Results", self)
+        refresh_action = QAction("Clear results", self)
         refresh_action.triggered.connect(self.clear_results)
         self.menuBar().addAction(refresh_action)
 
@@ -1081,6 +1081,8 @@ class MainWindow(QMainWindow):
             lambda: self.open_report_file("scan_errors.txt")
         )
         self.menuBar().addAction(open_scan_err_action)
+        self._apply_button_roles()
+        self._apply_tooltips()
 
         open_hash_err_action = QAction("Open hash_errors.txt", self)
         open_hash_err_action.triggered.connect(
@@ -1464,6 +1466,101 @@ class MainWindow(QMainWindow):
             os.startfile(str(p))
         except Exception as e:
             QMessageBox.warning(self, "Open failed", str(e))
+
+    def _apply_button_roles(self) -> None:
+        primary_buttons = [
+            self.start_btn,
+            self.monitor_start_btn,
+            self.monitor_resume_btn,
+            self.ai_action_btn,
+            self.plan_advance_btn,
+        ]
+        secondary_buttons = [
+            self.cancel_btn,
+            self.load_btn,
+            self.open_reports_btn,
+            self.space_audit_btn,
+            self.open_evidence_btn,
+            self.ai_why_btn,
+            self.investigate_btn,
+            self.monitor_pause_btn,
+            self.prefer_path_btn,
+            self.auto_prune_btn,
+            self.compare_prune_btn,
+            self.suggest_keep_paths_btn,
+            self.suggest_paths_btn,
+            self.analyze_paths_btn,
+            self.trash_folder_btn,
+            self.open_file_btn,
+            self.open_folder_btn,
+        ]
+        destructive_buttons = [self.keep_delete_btn]
+        for btn in primary_buttons:
+            btn.setProperty("buttonRole", "primary")
+        for btn in secondary_buttons:
+            btn.setProperty("buttonRole", "secondary")
+        for btn in destructive_buttons:
+            btn.setProperty("buttonRole", "destructive")
+        self.setStyleSheet(
+            """
+            QPushButton[buttonRole="primary"] {
+                background-color: #1f6feb;
+                color: #ffffff;
+                border: 1px solid #1a5fcc;
+                font-weight: 600;
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QPushButton[buttonRole="primary"]:disabled {
+                background-color: #9bbcf2;
+                color: #f4f7fc;
+                border: 1px solid #7da5e9;
+            }
+            QPushButton[buttonRole="secondary"] {
+                background-color: #f3f4f6;
+                color: #1f2937;
+                border: 1px solid #c8ced8;
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QPushButton[buttonRole="secondary"]:disabled {
+                background-color: #eceff3;
+                color: #67768a;
+                border: 1px solid #d3d9e2;
+            }
+            QPushButton[buttonRole="destructive"] {
+                background-color: #c0392b;
+                color: #ffffff;
+                border: 1px solid #a93226;
+                font-weight: 600;
+                padding: 6px 10px;
+                border-radius: 4px;
+            }
+            QPushButton[buttonRole="destructive"]:disabled {
+                background-color: #e8b3ad;
+                color: #fff8f7;
+                border: 1px solid #d99d97;
+            }
+            QToolTip {
+                background-color: #111827;
+                color: #f9fafb;
+                border: 1px solid #374151;
+                padding: 4px 6px;
+            }
+            """
+        )
+
+    def _apply_tooltips(self) -> None:
+        self.space_audit_btn.setToolTip("Review disk usage trends and largest folders.")
+        self.load_btn.setToolTip("Load a previous scan without starting a new one.")
+        self.suggest_keep_paths_btn.setToolTip("Suggest keep-path prefixes based on compare results.")
+        self.suggest_paths_btn.setToolTip("Recommend top locations to keep files from.")
+        self.analyze_paths_btn.setToolTip("Analyze Storage Patterns and suggest useful prefixes.")
+        self.auto_prune_btn.setToolTip("Build a keep/delete plan using your preferred keep path.")
+        self.compare_prune_btn.setToolTip("Create a delete plan for Root A when matching files exist in Root B.")
+        self.keep_delete_btn.setToolTip("Delete duplicate files and keep only your selected file.")
+        self.ai_action_btn.setToolTip("Apply the selected finding's recommended action.")
+        self.plan_advance_btn.setToolTip("Move the plan to its next approval state.")
 
     def _reports_root_dir(self) -> Path:
         return Path(self.report_edit.text().strip() or str(self.reports_root))
