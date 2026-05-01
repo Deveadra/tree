@@ -252,10 +252,10 @@ class ScanWorker(QObject):
 
             if self.compare_mode and len(self.roots) >= 2:
                 self.status.emit(
-                    f"Scanning compare roots:\nA: {self.roots[0]}\nB: {self.roots[1]}"
+                    f"Indexing files:\nA: {self.roots[0]}\nB: {self.roots[1]}"
                 )
             else:
-                self.status.emit(f"Scanning: {self.roots[0]}")
+                self.status.emit(f"Indexing files: {self.roots[0]}")
             self.progress.emit(0, 0)
 
             if self.compare_mode and len(self.roots) >= 2:
@@ -323,7 +323,7 @@ class ScanWorker(QObject):
             meta["status"] = "planned"
             write_json_atomic(meta_path, meta)
             self._persist_run_state(db_path, "planned")
-            self.status.emit("Finding duplicates (size + SHA-256)...")
+            self.status.emit("Hashing duplicates...")
 
             try:
                 con = sqlite3.connect(str(db_path))
@@ -814,6 +814,8 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setValue(0)
         self.status_lbl = QLabel("Ready.")
+        self.scan_state_lbl = QLabel("Scan state: idle")
+        self.scan_state_lbl.setStyleSheet("QLabel { font-weight: 700; color: #1f2937; }")
         self.remaining_lbl = QLabel("")
         self.remaining_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.remaining_lbl.setStyleSheet("QLabel { font-weight: 600; }")
@@ -826,6 +828,10 @@ class MainWindow(QMainWindow):
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
         self.status_box.setFixedHeight(110)
+        self.last_run_summary = QTextEdit()
+        self.last_run_summary.setReadOnly(True)
+        self.last_run_summary.setFixedHeight(90)
+        self.last_run_summary.setPlaceholderText("Last run summary persists here.")
 
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("QTabWidget::pane { padding: 12px; }")
@@ -1111,8 +1117,11 @@ class MainWindow(QMainWindow):
 
         main.addWidget(self.progress)
         main.addWidget(self.status_lbl)
+        main.addWidget(self.scan_state_lbl)
         main.addWidget(self.remaining_lbl)
         main.addWidget(self.rclone_stats)
+        main.addWidget(QLabel("Last run summary"))
+        main.addWidget(self.last_run_summary)
         main.addWidget(self.status_box)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1299,6 +1308,7 @@ class MainWindow(QMainWindow):
         self._ex_cache_raw: Optional[str] = None
         self._ex_cache: tuple[set[str], list[str]] = (set(), [])
         self.allowed_roots: list[Path] = []
+        self._restore_last_run_summary()
         self.validate_setup_fields()
         self.setTabOrder(self.root_edit, self.browse_root_btn)
         self.setTabOrder(self.browse_root_btn, self.compare_mode_chk)
@@ -1351,6 +1361,8 @@ class MainWindow(QMainWindow):
         self.monitor_pause_btn.setEnabled(mode == "running")
         self.monitor_resume_btn.setEnabled(mode == "paused")
         self.set_status(f"Space monitor is now {mode} (read-only).")
+        if mode in {"running", "paused"}:
+            self._set_scan_state(mode)
 
     def _on_monitor_spike_selection_changed(self) -> None:
         self.open_evidence_btn.setEnabled(bool(self.monitor_spikes_table.selectedItems()))
@@ -1608,6 +1620,26 @@ class MainWindow(QMainWindow):
     def set_status(self, msg: str) -> None:
         self.status_lbl.setText(msg)
         self.log(msg)
+
+    def _set_scan_state(self, state: str) -> None:
+        color = {
+            "running": "#1d4ed8",
+            "paused": "#92400e",
+            "canceled": "#b91c1c",
+            "completed": "#166534",
+            "error": "#b91c1c",
+            "idle": "#1f2937",
+        }.get(state, "#1f2937")
+        self.scan_state_lbl.setText(f"Scan state: {state}")
+        self.scan_state_lbl.setStyleSheet(f"QLabel {{ font-weight: 700; color: {color}; }}")
+
+    def _persist_last_run_summary(self, text: str) -> None:
+        QSettings("DupeFinder", "DupeFinderGUI").setValue("last_run_summary", text)
+
+    def _restore_last_run_summary(self) -> None:
+        text = QSettings("DupeFinder", "DupeFinderGUI").value("last_run_summary", "", type=str)
+        if text:
+            self.last_run_summary.setPlainText(text)
 
     def _make_run_report_dir(self, reports_root: Path, scan_root: Path) -> Path:
         def safe_tag(s: str) -> str:
@@ -2009,6 +2041,7 @@ class MainWindow(QMainWindow):
         self.clear_results()
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
+        self._set_scan_state("running")
 
         self.worker_thread = QThread()
         self.worker = ScanWorker(
@@ -2036,6 +2069,7 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.cancel("user_cancelled")
             self.set_status("Cancel requested…")
+            self._set_scan_state("canceled")
         if self.space_audit_worker:
             self.space_audit_worker.cancel_run("user_cancelled")
             self.set_status("Disk usage analysis cancellation requested…")
@@ -2209,8 +2243,13 @@ class MainWindow(QMainWindow):
         hash_total = m.get("hash_total")
         dupe_groups = m.get("dupe_groups")
 
-        lines = []
-        lines.append(f"Phase: {phase}")
+        stage = "Indexing files"
+        phase_l = str(phase).lower()
+        if "hash" in phase_l:
+            stage = "Hashing duplicates"
+        elif "report" in phase_l:
+            stage = "Writing reports"
+        lines = [f"Stage: {stage}"]
 
         curfile = m.get("current_file")
         if curfile:
@@ -2244,6 +2283,9 @@ class MainWindow(QMainWindow):
             lines.append(
                 f"Hashed size-groups: {hash_done:,}/{hash_total:,}   Dupe groups: {dupe_groups:,}"
             )
+        reclaim_est = m.get("reclaimable_estimate_bytes")
+        if reclaim_est is not None:
+            lines.append(f"Estimated reclaim: {format_bytes(int(reclaim_est))}")
 
         lines.append(f"Elapsed: {fmt_duration(elapsed_s)}")
         if eta_s is not None:
@@ -2263,6 +2305,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(False)
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
+        self._set_scan_state("completed")
 
         self.dupe_by_digest = {g.sha256: g for g in dupes}
 
@@ -2279,6 +2322,16 @@ class MainWindow(QMainWindow):
             f"Results loaded. Groups={len(dupes):,}  Reclaimable≈{format_bytes(reclaimable)}"
         )
         self.log(f"Reports written to: {self.report_dir}")
+        completion = (
+            f"Scan completed.\n"
+            f"Duplicate groups: {len(dupes):,}\n"
+            f"Estimated reclaim: {format_bytes(reclaimable)}\n"
+            "Next actions: Review groups, run recommended keep locations, then prune in Recycle Bin mode.\n"
+            f"Artifacts: {self.report_dir}"
+        )
+        self.last_run_summary.setPlainText(completion)
+        self._persist_last_run_summary(completion)
+        QMessageBox.information(self, "Scan completed", completion)
         QSettings("DupeFinder", "DupeFinderGUI").setValue(
             "last_report_dir", str(self.report_dir)
         )
@@ -2296,8 +2349,20 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(False)
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        QMessageBox.critical(self, "Scan error", err)
+        self._set_scan_state("error")
+        remediation = "Check permissions, close apps locking files, and verify the path exists."
+        low = err.lower()
+        if "permission" in low or "access" in low:
+            remediation = "Permission issue: grant read access or run against a readable folder."
+        elif "locked" in low or "in use" in low:
+            remediation = "Locked file issue: close the app using the file and retry."
+        elif "path" in low or "exist" in low:
+            remediation = "Invalid path issue: verify path exists and is reachable."
+        panel = f"{err}\n\nRemediation: {remediation}"
+        QMessageBox.critical(self, "Scan error", panel)
         self.set_status(f"Error: {err}")
+        self.last_run_summary.setPlainText(f"Last run failed.\n{panel}")
+        self._persist_last_run_summary(f"Last run failed.\n{panel}")
 
         self.worker = None
         self.worker_thread = None
