@@ -99,6 +99,31 @@ jobs:
           path: |
             .pytest_cache/**
 
+
+  gate_ui_layout_smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install UI test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3 xvfb
+          pip install -U pip pytest -r requirements.txt
+      - name: Run Qt UI layout smoke gate
+        run: xvfb-run -a pytest -q tests/test_ui_layout_smoke.py
+      - name: Upload UI snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-ui-layout-smoke-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            tests/fixtures/ui_snapshots/**
+            .pytest_cache/**
+
   gate_f_dependency_and_static_security_scans:
     runs-on: ubuntu-latest
     steps:
@@ -124,6 +149,7 @@ jobs:
       - gate_schema_compatibility
       - gate_soak_tests
       - gate_e2e_flows
+      - gate_ui_layout_smoke
     steps:
       - name: Enforce gate and flaky policy
         run: |
