@@ -118,11 +118,11 @@ from core.reports import (
     append_prune_event,
     safe_mkdir,
     write_json_atomic,
-    windows_recycle,
+    # windows_recycle,
     write_live_reports,
     write_scan_reports,
     write_path_suggestions,
-    write_run_summary,
+    # write_run_summary,
     write_versioned_meta,
 )
 
@@ -805,9 +805,18 @@ class MainWindow(QMainWindow):
         self.report_edit.setPlaceholderText(r"Example: E:\DupeReports")
         self.report_edit.setClearButtonEnabled(True)
         self.browse_report_btn = QPushButton("Browse…")
-        self.browse_root_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
-        self.browse_root2_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
-        self.browse_report_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        # self.browse_root_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        # self.browse_root2_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        # self.browse_report_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        self.browse_root_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        self.browse_root2_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        self.browse_report_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
 
         self.min_size_spin = QSpinBox()
         self.min_size_spin.setRange(0, 2_000_000_000)
@@ -1035,7 +1044,10 @@ class MainWindow(QMainWindow):
         self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
         self.trash_folder_edit.setClearButtonEnabled(True)
-        self.trash_folder_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        # self.trash_folder_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        self.trash_folder_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
 
         self.keep_delete_btn = QPushButton("Delete Duplicates (Keep Selected)")
         self.open_file_btn = QPushButton("Open selected file")
@@ -1111,11 +1123,11 @@ class MainWindow(QMainWindow):
         adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
         adv_group.setLayout(adv_form)
         form.addRow(adv_group)
-        form.addRow("Reports root:", rep_row)
+        # form.addRow("Reports root:", rep_row)
 
-        form.addRow("Min file size:", self.min_size_spin)
-        form.addRow("Excludes (names or full paths):", self.exclude_edit)
-        form.addRow("", self.follow_symlinks_chk)
+        # form.addRow("Min file size:", self.min_size_spin)
+        # form.addRow("Excludes (names or full paths):", self.exclude_edit)
+        # form.addRow("", self.follow_symlinks_chk)
         scan_setup_card_layout.addLayout(form)
         main.addWidget(scan_setup_card)
 
@@ -1721,8 +1733,9 @@ class MainWindow(QMainWindow):
 
 
     def _init_ui_system(self) -> None:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+        # QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+        # QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+        # Qt 6 enables high-DPI behavior by default; setting deprecated flags raises warnings.
         font = QFont()
         font.setPointSize(UITheme.TYPE_SCALE["md"])
         QApplication.instance().setFont(font)
