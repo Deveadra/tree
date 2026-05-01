@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFileIconProvider,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -781,6 +783,28 @@ class ElidedLabel(QLabel):
         super().resizeEvent(event)
 
 
+class ElidedLineEdit(QLineEdit):
+    def __init__(self, placeholder: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full_placeholder = placeholder
+        if placeholder:
+            self.setPlaceholderText(placeholder)
+
+    def setPlaceholderText(self, text: str) -> None:  # type: ignore[override]
+        self._full_placeholder = text
+        super().setPlaceholderText(self._elided_placeholder())
+        self.setToolTip(text if self.placeholderText() != text else "")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._full_placeholder:
+            super().setPlaceholderText(self._elided_placeholder())
+
+    def _elided_placeholder(self) -> str:
+        fm = QFontMetrics(self.font())
+        return fm.elidedText(self._full_placeholder, Qt.TextElideMode.ElideRight, max(0, self.width() - 20))
+
+
 class MainWindow(QMainWindow):
     WARNING_TEXTS = {
         "risk_mode_blocked_title": "Risk mode transition blocked",
@@ -795,6 +819,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._init_ui_system()
         self.setWindowTitle("Dupe Finder (GUI) — Size + SHA-256")
+        self.setMinimumSize(1024, 760)
+        self._compact_mode_breakpoint = 1180
 
         self.icon_provider = QFileIconProvider()
         self.dupe_by_digest: dict[str, DupeGroup] = {}
@@ -815,19 +841,20 @@ class MainWindow(QMainWindow):
         self.load_btn = QPushButton("Load previous scan…")
         self.open_reports_btn = QPushButton("Open current report folder")
 
-        self.root_edit = QLineEdit()
+        self.root_edit = ElidedLineEdit()
         self.root_edit.setPlaceholderText(r"E:\  (or any folder path)")
         self.root_edit.setClearButtonEnabled(True)
         self.browse_root_btn = QPushButton("Browse…")
         self.compare_mode_chk = QCheckBox("Compare two locations (Root A vs Root B)")
-        self.root2_edit = QLineEdit()
+        self.root2_edit = ElidedLineEdit()
         self.root2_edit.setPlaceholderText(r"Second root (e.g. E:\Backup\ or D:\)")
         self.root2_edit.setClearButtonEnabled(True)
         self.browse_root2_btn = QPushButton("Browse…")
         self.root2_edit.setEnabled(False)
         self.browse_root2_btn.setEnabled(False)
 
-        self.report_edit = QLineEdit(str(self.reports_root))
+        self.report_edit = ElidedLineEdit()
+        self.report_edit.setText(str(self.reports_root))
         self.report_edit.setPlaceholderText(r"Example: E:\DupeReports")
         self.report_edit.setClearButtonEnabled(True)
         self.browse_report_btn = QPushButton("Browse…")
@@ -853,7 +880,7 @@ class MainWindow(QMainWindow):
         # NOTE: this field supports BOTH:
         #   - dir names (e.g. ".git", "node_modules")
         #   - full path prefixes (e.g. "C:\Windows", "%LOCALAPPDATA%\Packages")
-        self.exclude_input = QLineEdit()
+        self.exclude_input = ElidedLineEdit()
         self.exclude_input.setPlaceholderText(r"Example: .git or C:\Windows")
         self.exclude_input.setClearButtonEnabled(True)
         self.exclude_add_btn = QPushButton("Add")
@@ -1041,7 +1068,7 @@ class MainWindow(QMainWindow):
                 "Permanent delete",
             ]
         )
-        self.prefer_path_edit = QLineEdit()
+        self.prefer_path_edit = ElidedLineEdit()
         self.prefer_path_edit.setPlaceholderText(
             r"Preferred keep paths (priority order). Separate with ';'  e.g. E:\MAIN\OneDrive\; E:\MAIN\RPics\; E:\MAIN\Projects\\"
         )
@@ -1060,7 +1087,8 @@ class MainWindow(QMainWindow):
 
         self.analyze_paths_btn = QPushButton("Analyze Storage Patterns")
 
-        self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
+        self.trash_folder_edit = ElidedLineEdit()
+        self.trash_folder_edit.setText(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
         self.trash_folder_edit.setClearButtonEnabled(True)
         self.trash_folder_btn.setIcon(
@@ -1074,7 +1102,17 @@ class MainWindow(QMainWindow):
 
         top = QWidget()
         self.setCentralWidget(top)
-        main = QVBoxLayout(top)
+        root_layout = QVBoxLayout(top)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.top_scroll = QScrollArea()
+        self.top_scroll.setWidgetResizable(True)
+        self.top_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.top_scroll_widget = QWidget()
+        self.top_scroll.setWidget(self.top_scroll_widget)
+        root_layout.addWidget(self.top_scroll)
+
+        main = QVBoxLayout(self.top_scroll_widget)
         main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
         main.setSpacing(LayoutMetrics.SPACING_MD)
 
@@ -1151,23 +1189,28 @@ class MainWindow(QMainWindow):
         self.app_brand_lbl.setMinimumWidth(0)
         header_row.addWidget(self.app_brand_lbl, 1)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(LayoutMetrics.SPACING_SM)
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.space_audit_btn)
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.load_btn)
-        btn_row.addWidget(self.open_reports_btn)
         self.start_btn.setText("Start")
         self.cancel_btn.setText("Cancel")
-        header_row.addWidget(self.start_btn, 0)
-        header_row.addWidget(self.cancel_btn, 0)
 
         tools_menu_btn = QToolButton()
         tools_menu_btn.setText("Tools / Logs")
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tools_menu = QMenu(tools_menu_btn)
-        header_row.addWidget(tools_menu_btn, 0)
+
+        self.primary_actions_widget = QWidget()
+        self.primary_actions_layout = QGridLayout(self.primary_actions_widget)
+        self.primary_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.primary_actions_layout.setHorizontalSpacing(LayoutMetrics.SPACING_SM)
+        self.primary_actions_layout.setVerticalSpacing(LayoutMetrics.SPACING_SM)
+        self.primary_action_buttons = [
+            self.start_btn,
+            self.space_audit_btn,
+            self.cancel_btn,
+            self.load_btn,
+            self.open_reports_btn,
+            tools_menu_btn,
+        ]
+        header_row.addWidget(self.primary_actions_widget, 0)
         main.addLayout(header_row)
 
         main.addWidget(self.progress)
@@ -1383,6 +1426,7 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.exclude_input, self.exclude_add_btn)
         self.setTabOrder(self.exclude_add_btn, self.exclude_list)
         self._restore_ui_state()
+        self._update_compact_layout()
 
     def _set_badge(self, lbl: QLabel, text: str) -> None:
         if text:
@@ -1391,6 +1435,60 @@ class MainWindow(QMainWindow):
         else:
             lbl.setText("")
 
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_splitter_layout_mode()
+        self._update_compact_layout()
+
+    def _update_splitter_layout_mode(self) -> None:
+        if not hasattr(self, "main_splitter"):
+            return
+        desired = Qt.Orientation.Vertical if self.width() < self._compact_mode_breakpoint else Qt.Orientation.Horizontal
+        if self.main_splitter.orientation() != desired:
+            self.main_splitter.setOrientation(desired)
+            if desired == Qt.Orientation.Vertical:
+                self.main_splitter.setSizes([max(280, int(self.height() * 0.55)), max(240, int(self.height() * 0.45))])
+            else:
+                self.main_splitter.setSizes([max(320, int(self.width() * 0.45)), max(320, int(self.width() * 0.55))])
+
+
+    def _update_compact_layout(self) -> None:
+        if not hasattr(self, "primary_actions_layout"):
+            return
+        while self.primary_actions_layout.count():
+            item = self.primary_actions_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().setParent(self.primary_actions_widget)
+
+        compact = self.width() < 1366
+        if compact:
+            cols = 3
+            for idx, btn in enumerate(self.primary_action_buttons):
+                self.primary_actions_layout.addWidget(btn, idx // cols, idx % cols)
+        else:
+            for idx, btn in enumerate(self.primary_action_buttons):
+                self.primary_actions_layout.addWidget(btn, 0, idx)
+
+    def run_resize_sanity_checks(self) -> list[tuple[int, bool, str]]:
+        widths = [900, 1100, 1366, 1920]
+        heights = {900: 900, 1100: 900, 1366: 900, 1920: 1000}
+        checks: list[tuple[int, bool, str]] = []
+        for w in widths:
+            self.resize(w, heights[w])
+            QApplication.processEvents()
+            controls = [
+                self.root_edit, self.browse_root_btn, self.report_edit, self.browse_report_btn,
+                self.start_btn, self.cancel_btn, self.load_btn, self.open_reports_btn
+            ]
+            overlaps = []
+            for i, a in enumerate(controls):
+                ga = a.geometry()
+                for b in controls[i + 1:]:
+                    if ga.intersects(b.geometry()):
+                        overlaps.append(f"{a.objectName() or a.__class__.__name__}:{b.objectName() or b.__class__.__name__}")
+            checks.append((w, len(overlaps) == 0, ", ".join(overlaps) if overlaps else "no overlaps"))
+        return checks
     def validate_setup_fields(self) -> None:
         root = Path(self.root_edit.text().strip()) if self.root_edit.text().strip() else None
         report = Path(self.report_edit.text().strip()) if self.report_edit.text().strip() else None
