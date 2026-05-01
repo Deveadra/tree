@@ -59,3 +59,21 @@ def test_attribute_growth_adds_alternate_hypothesis_for_non_high_confidence():
     }
     report = attribute_growth(event)
     assert any("alternate_hypotheses" in suspect for suspect in report["suspects"])
+
+
+def test_attribute_growth_marks_open_handle_probable_cause_and_label():
+    event = {
+        "event_id": "spike-4",
+        "window_start": "2026-01-01T00:00:00Z",
+        "window_end": "2026-01-01T00:01:00Z",
+        "directory_growth_windows": [{"path": "/var/tmp", "delta_bytes": 1024}],
+        "extension_surges": [],
+        "process_io_deltas": [],
+        "open_handle_deltas": [{"process": "backupd", "deleted_open_handles": 4}],
+    }
+    report = attribute_growth(event)
+    backup = next(s for s in report["suspects"] if s["name"] == "backupd")
+    assert backup["observation"] == "probable_open_handle_not_released"
+    assert backup["attribution"] == "inferred"
+    assert backup["confidence_tier"] in {"medium", "high"}
+    assert report["remediation"]["safe_steps"][-1].lower().startswith("reboot")
