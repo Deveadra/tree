@@ -33,7 +33,7 @@ from PySide6.QtCore import (
     Slot,
     QSize,
 )
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtGui import QAction, QFont, QIcon, QFontMetrics
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -68,11 +68,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QToolButton,
-    QToolButton,
     QMenu,
     QStyle,
     QGridLayout,
     QBoxLayout,
+    QSizePolicy,
 )
 
 from core.service import (
@@ -752,9 +752,35 @@ class UITheme:
 # Main Window
 # ----------------------------
 
-SPACING_SM = 8
-SPACING_MD = 14
-SPACING_LG = 20
+class LayoutMetrics:
+    SPACING_SM = 8
+    SPACING_MD = 14
+    SPACING_LG = 20
+    FORM_ROW_SPACING = 8
+    FORM_LABEL_INPUT_SPACING = 14
+    CONTENT_MARGINS = 20
+
+
+
+
+class ElidedLabel(QLabel):
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full_text = text
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self._full_text = text
+        fm = QFontMetrics(self.font())
+        elided = fm.elidedText(text, Qt.TextElideMode.ElideRight, max(0, self.width() - 4))
+        super().setText(elided)
+        self.setToolTip(text if elided != text else "")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        self.setText(self._full_text)
+        super().resizeEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -808,9 +834,15 @@ class MainWindow(QMainWindow):
         self.report_edit.setPlaceholderText(r"Example: E:\DupeReports")
         self.report_edit.setClearButtonEnabled(True)
         self.browse_report_btn = QPushButton("Browse…")
-        self.browse_root_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
-        self.browse_root2_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
-        self.browse_report_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        self.browse_root_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        self.browse_root2_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        self.browse_report_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
 
         self.min_size_spin = QSpinBox()
         self.min_size_spin.setRange(0, 2_000_000_000)
@@ -855,10 +887,8 @@ class MainWindow(QMainWindow):
 
         self.status_box = QTextEdit()
         self.status_box.setReadOnly(True)
-        self.status_box.setFixedHeight(110)
         self.last_run_summary = QTextEdit()
         self.last_run_summary.setReadOnly(True)
-        self.last_run_summary.setFixedHeight(90)
         self.last_run_summary.setPlaceholderText("Last run summary persists here.")
 
         self.tabs = QTabWidget()
@@ -877,7 +907,6 @@ class MainWindow(QMainWindow):
         self.monitor_spark_chart.addSeries(self.monitor_sparkline)
         self.monitor_spark_chart.createDefaultAxes()
         self.monitor_spark_view = QChartView(self.monitor_spark_chart)
-        self.monitor_spark_view.setMinimumHeight(120)
         self.monitor_spikes_table = QTableWidget(0, 5)
         self.monitor_spikes_table.setHorizontalHeaderLabels(
             ["Severity", "Time (UTC)", "Delta", "Top suspects", "Evidence bundle"]
@@ -906,7 +935,6 @@ class MainWindow(QMainWindow):
         self.findings_summary.setPlaceholderText(
             "Top findings, confidence, protected-zone warnings, and safe next steps will appear here."
         )
-        self.findings_summary.setFixedHeight(180)
         self.protected_warning_lbl = QLabel("")
         self.protected_warning_lbl.setWordWrap(True)
         self.protected_warning_lbl.setAccessibleName("Protected warning banner")
@@ -1038,7 +1066,9 @@ class MainWindow(QMainWindow):
         self.trash_folder_edit = QLineEdit(str(self.report_dir / "_trash"))
         self.trash_folder_btn = QPushButton("Browse…")
         self.trash_folder_edit.setClearButtonEnabled(True)
-        self.trash_folder_btn.setIcon(self.style().standardIcon(self.style().SP_DirOpenIcon))
+        self.trash_folder_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
 
         self.keep_delete_btn = QPushButton("Delete Duplicates (Keep Selected)")
         self.open_file_btn = QPushButton("Open selected file")
@@ -1048,8 +1078,8 @@ class MainWindow(QMainWindow):
         top = QWidget()
         self.setCentralWidget(top)
         main = QVBoxLayout(top)
-        main.setContentsMargins(SPACING_LG, SPACING_LG, SPACING_LG, SPACING_LG)
-        main.setSpacing(SPACING_MD)
+        main.setContentsMargins(LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS, LayoutMetrics.CONTENT_MARGINS)
+        main.setSpacing(LayoutMetrics.SPACING_MD)
 
         section_header_style = f"QLabel {{ font-size: {UITheme.TYPE_SCALE['lg']}px; font-weight: 700; color: {UITheme.PALETTE['text']}; }}"
 
@@ -1059,14 +1089,18 @@ class MainWindow(QMainWindow):
 
         scan_setup_card = QGroupBox()
         scan_setup_card_layout = QVBoxLayout(scan_setup_card)
-        scan_setup_card_layout.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        scan_setup_card_layout.setSpacing(SPACING_MD)
+        scan_setup_card_layout.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        scan_setup_card_layout.setSpacing(LayoutMetrics.SPACING_MD)
 
         self._scan_setup_mode = None
         self.scan_setup_grid = QGridLayout()
         self.scan_setup_grid.setContentsMargins(0, 0, 0, 0)
         self.scan_setup_grid.setHorizontalSpacing(SPACING_MD)
         self.scan_setup_grid.setVerticalSpacing(SPACING_SM)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(LayoutMetrics.FORM_LABEL_INPUT_SPACING)
+        form.setVerticalSpacing(LayoutMetrics.FORM_ROW_SPACING)
 
         basic_group = QGroupBox("Scan setup")
         self.basic_form = QFormLayout()
@@ -1075,7 +1109,7 @@ class MainWindow(QMainWindow):
         self.basic_form.setHorizontalSpacing(SPACING_MD)
         self.basic_form.setVerticalSpacing(SPACING_SM)
         root_row = QHBoxLayout()
-        root_row.setSpacing(SPACING_SM)
+        root_row.setSpacing(LayoutMetrics.SPACING_SM)
         root_row.addWidget(self.root_edit)
         root_row.addWidget(self.browse_root_btn)
         root_row.setStretch(0, 1)
@@ -1087,7 +1121,7 @@ class MainWindow(QMainWindow):
         self.basic_form.addRow("", QLabel("Compare mode scans both roots and only reports cross-root duplicates."))
 
         root2_row = QHBoxLayout()
-        root2_row.setSpacing(SPACING_SM)
+        root2_row.setSpacing(LayoutMetrics.SPACING_SM)
         root2_row.addWidget(self.root2_edit)
         root2_row.addWidget(self.browse_root2_btn)
         root2_row.setStretch(0, 1)
@@ -1096,7 +1130,7 @@ class MainWindow(QMainWindow):
         self.basic_form.addRow("", self.root2_badge)
 
         rep_row = QHBoxLayout()
-        rep_row.setSpacing(SPACING_SM)
+        rep_row.setSpacing(LayoutMetrics.SPACING_SM)
         rep_row.addWidget(self.report_edit)
         rep_row.addWidget(self.browse_report_btn)
         rep_row.setStretch(0, 1)
@@ -1133,29 +1167,46 @@ class MainWindow(QMainWindow):
         self.scan_setup_grid.setColumnStretch(0, 1)
         self.scan_setup_grid.setColumnStretch(1, 1)
         scan_setup_card_layout.addLayout(self.scan_setup_grid)
+        adv_form = QFormLayout()
+        ex_row = QHBoxLayout()
+        ex_row.addWidget(self.exclude_input)
+        ex_row.addWidget(self.exclude_add_btn)
+        adv_form.addRow("Add exclude token:", ex_row)
+        adv_form.addRow("Exclude tokens:", self.exclude_list)
+        adv_form.addRow("", self.exclude_remove_btn)
+        adv_form.addRow("", self.follow_symlinks_chk)
+        adv_form.addRow("", QLabel("Symlink following may traverse system paths, network mounts, or loops; slower and riskier."))
+        adv_group.setLayout(adv_form)
+        form.addRow(adv_group)
+        scan_setup_card_layout.addLayout(form)
         main.addWidget(scan_setup_card)
         self._update_scan_setup_layout_mode()
 
-        actions_header = QLabel("Primary Actions")
-        actions_header.setStyleSheet(section_header_style)
-        main.addWidget(actions_header)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(SPACING_SM)
+        self.app_brand_lbl = ElidedLabel("Dupe Finder Pro — Safe Duplicate Discovery & Cleanup")
+        self.app_brand_lbl.setStyleSheet(section_header_style)
+        self.app_brand_lbl.setMinimumWidth(0)
+        header_row.addWidget(self.app_brand_lbl, 1)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(SPACING_SM)
+        btn_row.setSpacing(LayoutMetrics.SPACING_SM)
         btn_row.addWidget(self.start_btn)
         btn_row.addWidget(self.space_audit_btn)
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.load_btn)
         btn_row.addWidget(self.open_reports_btn)
+        self.start_btn.setText("Start")
+        self.cancel_btn.setText("Cancel")
+        header_row.addWidget(self.start_btn, 0)
+        header_row.addWidget(self.cancel_btn, 0)
 
         tools_menu_btn = QToolButton()
         tools_menu_btn.setText("Tools / Logs")
         tools_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tools_menu = QMenu(tools_menu_btn)
-
-        btn_row.addWidget(tools_menu_btn)
-        btn_row.addStretch(1)
-        main.addLayout(btn_row)
+        header_row.addWidget(tools_menu_btn, 0)
+        main.addLayout(header_row)
 
         main.addWidget(self.progress)
         main.addWidget(self.status_lbl)
@@ -1171,8 +1222,8 @@ class MainWindow(QMainWindow):
 
         left = QWidget()
         left_l = QVBoxLayout(left)
-        left_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        left_l.setSpacing(SPACING_SM)
+        left_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        left_l.setSpacing(LayoutMetrics.SPACING_SM)
         results_header = QLabel("Results")
         results_header.setStyleSheet(section_header_style)
         left_l.addWidget(results_header)
@@ -1194,8 +1245,8 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_l = QVBoxLayout(right)
-        right_l.setContentsMargins(SPACING_MD, SPACING_MD, SPACING_MD, SPACING_MD)
-        right_l.setSpacing(SPACING_SM)
+        right_l.setContentsMargins(LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD, LayoutMetrics.SPACING_MD)
+        right_l.setSpacing(LayoutMetrics.SPACING_SM)
         actions_header_right = QLabel("Recommended Actions")
         actions_header_right.setStyleSheet(section_header_style)
         right_l.addWidget(actions_header_right)
@@ -1246,19 +1297,17 @@ class MainWindow(QMainWindow):
 
         main.addWidget(splitter)
 
+        self._apply_size_policies()
+
         refresh_action = QAction("Clear results", self)
         refresh_action.triggered.connect(self.clear_results)
-        self.menuBar().addAction(refresh_action)
-
         open_reports_action = QAction("Open report folder", self)
         open_reports_action.triggered.connect(self.open_report_folder)
-        self.menuBar().addAction(open_reports_action)
 
         open_scan_err_action = QAction("Open scan_errors.txt", self)
         open_scan_err_action.triggered.connect(
             lambda: self.open_report_file("scan_errors.txt")
         )
-        self.menuBar().addAction(open_scan_err_action)
         self._apply_button_roles()
         self._apply_modern_theme()
         self._apply_tooltips()
@@ -1267,27 +1316,36 @@ class MainWindow(QMainWindow):
         open_hash_err_action.triggered.connect(
             lambda: self.open_report_file("hash_errors.txt")
         )
-        self.menuBar().addAction(open_hash_err_action)
-
         open_dupe_summary_action = QAction("Open duplicates_summary.txt", self)
         open_dupe_summary_action.triggered.connect(
             lambda: self.open_report_file("duplicates_summary.txt")
         )
-        self.menuBar().addAction(open_dupe_summary_action)
 
         open_delete_log_action = QAction("Open deletion_log.txt", self)
         open_delete_log_action.triggered.connect(
             lambda: self.open_report_file("deletion_log.txt")
         )
-        self.menuBar().addAction(open_delete_log_action)
-
+        non_destructive_hdr = QAction("General Utilities", self)
+        non_destructive_hdr.setEnabled(False)
+        tools_menu.addAction(non_destructive_hdr)
         tools_menu.addAction(refresh_action)
+        tools_menu.addAction(self.load_btn.text(), self.load_live_reports)
+        tools_menu.addAction(self.space_audit_btn.text(), self.start_space_audit)
         tools_menu.addAction(open_reports_action)
         tools_menu.addSeparator()
+        logs_hdr = QAction("Logs / Reports", self)
+        logs_hdr.setEnabled(False)
+        tools_menu.addAction(logs_hdr)
         tools_menu.addAction(open_scan_err_action)
         tools_menu.addAction(open_hash_err_action)
         tools_menu.addAction(open_dupe_summary_action)
         tools_menu.addAction(open_delete_log_action)
+        tools_menu.addSeparator()
+        destructive_hdr = QAction("Destructive Utilities", self)
+        destructive_hdr.setEnabled(False)
+        tools_menu.addAction(destructive_hdr)
+        tools_menu.addAction(self.auto_prune_btn.text(), self.auto_prune_by_preferred_path)
+        tools_menu.addAction(self.compare_prune_btn.text(), self.compare_prune_delete_a_using_b)
         tools_menu_btn.setMenu(tools_menu)
 
         neutral_btn_style = "QPushButton { font-weight: 500; }"
@@ -1781,11 +1839,51 @@ class MainWindow(QMainWindow):
 
 
     def _init_ui_system(self) -> None:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+        # Qt 6 enables high-DPI behavior by default; setting deprecated flags raises warnings.
         font = QFont()
         font.setPointSize(UITheme.TYPE_SCALE["md"])
         QApplication.instance().setFont(font)
+
+    def _apply_size_policies(self) -> None:
+        label_widgets = [
+            self.status_lbl,
+            self.scan_state_lbl,
+            self.remaining_lbl,
+            self.rclone_stats,
+            self.results_empty_lbl,
+            self.row_hint_lbl,
+            self.detail_size_card,
+            self.detail_mtime_card,
+            self.detail_path_card,
+        ]
+        for widget in label_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+        input_widgets = [
+            self.root_edit,
+            self.root2_edit,
+            self.report_edit,
+            self.exclude_input,
+            self.prefer_path_edit,
+            self.trash_folder_edit,
+            self.min_size_spin,
+            self.delete_mode,
+        ]
+        for widget in input_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        expanding_widgets = [
+            self.status_box,
+            self.last_run_summary,
+            self.tabs,
+            self.files_table,
+            self.findings_summary,
+            self.monitor_spikes_table,
+            self.ai_findings_table,
+            self.monitor_spark_view,
+        ]
+        for widget in expanding_widgets:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def _apply_action_icons(self) -> None:
         icon_map = {
@@ -2939,7 +3037,6 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     w = MainWindow()
-    w.resize(1200, 720)
     w.show()
     return app.exec()
 
