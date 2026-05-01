@@ -40,5 +40,10 @@ def test_ai_findings_evidence_matches_golden_schema_fixture():
 
     for key in golden["required_top_level_keys"]:
         assert key in evidence
+    assert evidence["data_handling_mode"] in {"local_only", "cloud_assisted"}
+    assert "retention_schedule_days" in evidence
+    assert "pii_handling_profile" in evidence
+    assert "secure_export" in evidence
+    assert "admin_controls" in evidence
     for tier in golden["required_export_tiers"]:
         assert tier in evidence["export_tiers"]

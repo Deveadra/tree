@@ -30,6 +30,32 @@ DEFAULT_REDACTION_POLICY = {
     "path_segments": "partial",
 }
 
+DEFAULT_PII_HANDLING_PROFILES: dict[str, dict[str, str]] = {
+    "strict": {"usernames": "hash", "hostnames": "hash", "process_args": "mask", "path_segments": "mask"},
+    "balanced": {"usernames": "hash", "hostnames": "hash", "process_args": "mask", "path_segments": "partial"},
+    "forensic": {"usernames": "partial", "hostnames": "partial", "process_args": "partial", "path_segments": "partial"},
+}
+
+DEFAULT_RETENTION_SCHEDULE_DAYS = {
+    "prune_audit_log_days": 365,
+    "space_watch_timeline_days": 90,
+    "ai_findings_days": 180,
+    "evidence_bundle_days": 30,
+}
+
+DEFAULT_ADMIN_CONTROLS = {
+    "audit_logging_enabled": True,
+    "deletion_control": "policy_guarded",
+    "compliance_evidence_capture": True,
+}
+
+
+def _detect_ai_mode(consent_state: dict[str, Any] | None) -> str:
+    state = consent_state or {}
+    if bool(state.get("provider_enabled")):
+        return "cloud_assisted"
+    return "local_only"
+
 
 def _redaction_policy(overrides: dict[str, str] | None = None) -> dict[str, str]:
     policy = dict(DEFAULT_REDACTION_POLICY)
@@ -79,16 +105,46 @@ def build_normalized_evidence(
     user_context: dict[str, Any] | None = None,
     redaction_policy: dict[str, str] | None = None,
     consent_state: dict[str, Any] | None = None,
+    pii_profile: str = "balanced",
+    retention_schedule_days: dict[str, int] | None = None,
+    secure_export: dict[str, Any] | None = None,
+    admin_controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ts = str(disk_metrics_payload.get("timestamp") or _utc_now_iso())
     policy = _redaction_policy(redaction_policy)
+    resolved_profile = pii_profile if pii_profile in DEFAULT_PII_HANDLING_PROFILES else "balanced"
+    effective_retention = dict(DEFAULT_RETENTION_SCHEDULE_DAYS)
+    if isinstance(retention_schedule_days, dict):
+        for k, v in retention_schedule_days.items():
+            if isinstance(v, int) and v >= 0:
+                effective_retention[k] = v
+    effective_admin_controls = dict(DEFAULT_ADMIN_CONTROLS)
+    if isinstance(admin_controls, dict):
+        effective_admin_controls.update(admin_controls)
+    effective_secure_export = {
+        "package_format": "bundle_manifest",
+        "encryption": {"supported": True, "enabled": False, "method": "password"},
+    }
+    if isinstance(secure_export, dict):
+        effective_secure_export.update(secure_export)
+    ai_mode = _detect_ai_mode(consent_state)
     evidence: dict[str, Any] = {
         "report_redaction_level": "full",
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "run_id": run_id,
         "event_id": event_id,
         "generated_at": _utc_now_iso(),
+        "data_handling_mode": ai_mode,
+        "data_handling_documentation": {
+            "local_only": "AI analysis remains on-device and avoids external model providers.",
+            "cloud_assisted": "AI analysis may send approved telemetry/evidence to configured providers.",
+        },
         "redaction_policy": policy,
+        "pii_handling_profile": resolved_profile,
+        "pii_handling_profiles": deepcopy(DEFAULT_PII_HANDLING_PROFILES),
+        "retention_schedule_days": effective_retention,
+        "secure_export": effective_secure_export,
+        "admin_controls": effective_admin_controls,
         "export_tiers": {},
         "space_audit_snapshot_features": [
             _feature({"metrics": disk_metrics_payload}, source_file="disk_metrics.json", run_id=run_id, event_id=event_id, timestamp=ts),
@@ -147,6 +203,10 @@ def build_evidence_from_space_outputs(
         user_notes=str(space_watch_output.get("operator_notes", "")),
         user_context={"space_watch_event": event_id},
         consent_state=dict(space_watch_output.get("consent_state", {})),
+        pii_profile=str(space_watch_output.get("pii_profile", "balanced")),
+        retention_schedule_days=dict(space_watch_output.get("retention_schedule_days", {})),
+        secure_export=dict(space_watch_output.get("secure_export", {})),
+        admin_controls=dict(space_watch_output.get("admin_controls", {})),
     )
     incidents = space_watch_output.get("incidents", [])
     cross_volume = [i for i in incidents if isinstance(i, dict) and i.get("volume_id")]
