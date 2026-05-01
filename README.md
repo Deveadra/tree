@@ -246,6 +246,73 @@ After the branch exists on the remote, rerun the setup/fetch step.
 - CI gate workflow: `.github/workflows/ci.yml` (A-E gate jobs + release blocker).
 - Release checklist: `docs/release_checklist.md`.
 
+## Performance program: datasets, endurance, regressions, and recovery
+
+### Benchmark dataset definitions
+
+The performance harness defines representative benchmark datasets for:
+- million-file scale,
+- deep directory trees,
+- mixed permission profiles (including denied paths),
+- cloud placeholder-heavy trees.
+
+Print the dataset catalog:
+
+```bash
+python scripts/perf_harness.py datasets
+```
+
+### 24h / 72h monitor endurance checks
+
+Run endurance checks with explicit memory/CPU ceilings and drift validation:
+
+```bash
+python scripts/perf_harness.py monitor --hours 24 --memory-ceiling-mb 2048 --cpu-ceiling-pct 75
+python scripts/perf_harness.py monitor --hours 72 --memory-ceiling-mb 3072 --cpu-ceiling-pct 75
+```
+
+Both checks emit:
+- peak memory/CPU,
+- memory/CPU drift,
+- pass/fail booleans for ceilings and drift thresholds.
+
+### Baselines + CI regression failure gate
+
+Initialize baseline timing JSON:
+
+```bash
+python scripts/perf_harness.py baseline-init --out reports/perf_baseline.json
+```
+
+Check current run against baseline and fail when degradation exceeds threshold:
+
+```bash
+python scripts/perf_harness.py regression-check \
+  --baseline reports/perf_baseline.json \
+  --current reports/perf_current.json \
+  --fail-threshold-pct 15
+```
+
+`regression-check` exits with non-zero status on significant degradations, so CI can gate merges.
+
+### Resume/recovery validation
+
+Recovery behavior is validated in tests for:
+- cancel + restart watchdog sampling,
+- correlated sampler restart,
+- restart after forced interruption with a partially written output file.
+
+### Published performance envelope and hardware profiles
+
+Recommended host profiles for benchmark and soak runs:
+- **Developer minimum**: 8 vCPU, 16 GB RAM, NVMe SSD.
+- **CI standard**: 8–16 vCPU, 32 GB RAM, high-IOPS SSD workspace.
+- **Scale certification**: 16+ vCPU, 64 GB RAM, enterprise NVMe, isolated runner.
+
+Envelope expectations (guidance):
+- 1M-file synthetic dataset should complete in single-digit to low double-digit minutes.
+- 5M deep mixed-permission dataset should complete within ~1 hour on CI standard profile.
+- 10M placeholder-heavy dataset should complete within ~2 hours on scale certification profile.
 ## Release security and reproducibility
 
 Release hardening assets live under `scripts/release/` and `docs/security/release_signing_and_verification.md`:

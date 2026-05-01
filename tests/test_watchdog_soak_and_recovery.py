@@ -73,3 +73,20 @@ def test_correlated_watchdog_restart_after_cancel(tmp_path: Path):
     assert recovered["cancelled"] is False
     assert recovered["fast_rows_written"] == 3
     assert recovered["growth_rows_written"] == 3
+
+
+def test_watchdog_resume_after_forced_interruption_with_partial_file(tmp_path: Path):
+    out_csv = tmp_path / "free_space_timeline.csv"
+    out_csv.write_text("ts,free_bytes,used_bytes\n", encoding="utf-8")
+
+    recovered = sample_free_space_timeline(
+        root=tmp_path,
+        output_csv=out_csv,
+        interval_seconds=0.0,
+        max_rows=4,
+    )
+
+    lines = out_csv.read_text(encoding="utf-8").strip().splitlines()
+    assert recovered["cancelled"] is False
+    assert recovered["rows_written"] == 4
+    assert len(lines) == 5
