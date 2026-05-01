@@ -82,6 +82,19 @@ jobs:
             tests/test_golden_plan_output.py \
             tests/test_privacy_lint.py
 
+  gate_f_dependency_and_static_security_scans:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -U pip pip-audit bandit
+      - name: Dependency vulnerability scan
+        run: pip-audit
+      - name: Static security scan
+        run: bandit -q -r core config cli.py dupe_core.py dupe_finder_gui.py
+
   release_blocker:
     name: Release blocker (policy/explainability/non-destructive invariants)
     runs-on: ubuntu-latest
@@ -89,6 +102,7 @@ jobs:
       - gate_c_policy_firewall_and_prompt_security
       - gate_d_explainability_and_ranking_repro
       - gate_e_privacy_and_export_hygiene
+      - gate_f_dependency_and_static_security_scans
     steps:
       - run: |
           echo "Release is blocked unless Gates C/D/E are green."

@@ -424,11 +424,21 @@ def resolve_previous_snapshot(report_root: str | Path, current_report_dir: str |
 
     candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
     for snapshot_path in root.glob("**/space_snapshot.json"):
-        snapshot_dir = snapshot_path.parent.resolve()
+        try:
+            resolved_snapshot_path = snapshot_path.resolve()
+        except OSError:
+            continue
+        try:
+            if not resolved_snapshot_path.is_relative_to(root):
+                continue
+        except AttributeError:
+            if root not in resolved_snapshot_path.parents and resolved_snapshot_path != root:
+                continue
+        snapshot_dir = resolved_snapshot_path.parent
         if snapshot_dir == current and root != current:
             continue
         try:
-            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            data = json.loads(resolved_snapshot_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
         if str(data.get("run", {}).get("root", "")) != scan_root_resolved:
